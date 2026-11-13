@@ -81,7 +81,8 @@ narrate refusal/complication). Go errors are reserved for harness faults.
 | `combat_status` | — | — (read) | per-combatant AP/HP/conditions |
 | `spend_ap` | `actor`, `action`, `cost` | combat.SpendAP | AP left; IMPOSSIBLE if insufficient/prone |
 | `can_act` | `actor`, `action` | combat.CanAct | advisory boolean + reasons |
-| `resolve_attack` | `attacker`, `weapon`, `defender`, `reaction? ("parry"|"dodge"|"none")` | combat.ResolveAttack | attack roll, reaction roll, hit location, damage, armour, wound severity + effects |
+| `resolve_attack` | `attacker`, `weapon`, `defender`, `reaction? ("parry"|"dodge"|"none")` | combat.ResolveAttack | attack roll, reaction roll, hit location, damage, armour, wound severity + effects, `available_special_effects` |
+| `apply_special_effect` | `effect`, `attacker?`, `defender?`, `target?` | combat.ApplySpecialEffect | applied effect mechanics (impale, knockback...); GM-adjudicated effects return `adjudicated: true` + narration facts |
 | `apply_damage` | `actor`, `location`, `amount`, `type?` | combat.ApplyDamage | new location HP, wound severity, effects |
 | `heal` | `actor`, `method` | combat.Heal | HP restored over time |
 | `combat_end` | — | combat.End | summary of encounter |
