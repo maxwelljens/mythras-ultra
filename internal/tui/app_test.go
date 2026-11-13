@@ -1,0 +1,868 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+// ansiRe matches SGR escape sequences so assertions can compare rendered
+// output as plain text.
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// plain strips ANSI styling from rendered output for text assertions.
+func plain(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
+}
+
+// fakeDriver records Sends and hands out events; it stands in for the
+// harness so no real terminal, network or LLM is involved.
+type fakeDriver struct {
+	events  chan Event
+	sendErr error
+	sends   []sentRecord
+	md      Metadata // handed out by Metadata()
+}
+
+type sentRecord struct {
+	ch   Channel
+	text string
+}
+
+var _ Driver = (*fakeDriver)(nil)
+
+func newFakeDriver() *fakeDriver {
+	return &fakeDriver{events: make(chan Event, 8)}
+}
+
+func (d *fakeDriver) Send(ctx context.Context, ch Channel, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.sends = append(d.sends, sentRecord{ch: ch, text: text})
+	return d.sendErr
+}
+
+func (d *fakeDriver) Events() <-chan Event { return d.events }
+
+func (d *fakeDriver) Metadata() Metadata { return d.md }
+
+func (d *fakeDriver) Close() error {
+	close(d.events)
+	return nil
+}
+
+// newTestApp builds an app around a fake driver and a fixed window size.
+func newTestApp(t *testing.T, opts Options, width, height int) (*App, *fakeDriver) {
+	t.Helper()
+	if opts.SessionName == "" {
+		opts.SessionName = "Test Session"
+	}
+	if opts.ModelName == "" {
+		opts.ModelName = "test-model"
+	}
+	d := newFakeDriver()
+	a := New(d, opts)
+	_, _ = a.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	return a, d
+}
+
+// key builds a key press for a printable rune.
+func key(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
+}
+
+// ctrl builds a ctrl+letter key press.
+func ctrl(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl}
+}
+
+// press feeds a key to the app and returns the resulting command.
+func press(t *testing.T, a *App, k tea.KeyPressMsg) tea.Cmd {
+	t.Helper()
+	_, cmd := a.Update(k)
+	return cmd
+}
+
+// view renders the current screen as plain text.
+func view(a *App) string {
+	return a.View().Content
+}
+
+func TestWindowSizeLayout(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 24)
+	v := a.View()
+	if !v.AltScreen {
+		t.Error("chat shell should use the alternate screen")
+	}
+	if v.WindowTitle == "" {
+		t.Error("window title should be set")
+	}
+	lines := strings.Split(v.Content, "\n")
+	if len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (header/body/input/footer fill the window)", len(lines))
+	}
+	for _, want := range []string{"Test Session", "test-model", "[IC]", "save –", "decision –", "> "} {
+		if !strings.Contains(v.Content, want) {
+			t.Errorf("header/input should contain %q", want)
+		}
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > 80 {
+			t.Errorf("line wider than the window (%d cols): %q", lipgloss.Width(line), line)
+		}
+	}
+}
+
+func TestNarrativeEventRenders(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 70, 20)
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind:     EventNarrative,
+		Channel:  ChannelIC,
+		Markdown: "# The Crypt Door\n\nYou notice a faint **draft** from beneath the flagstones.",
+		At:       time.Now(),
+	}})
+	got := plain(view(a))
+	for _, want := range []string{"The Crypt Door", "draft"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("narrative should render %q, view:\n%s", want, got)
+		}
+	}
+}
+
+func TestToolAnnotationRenders(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 70, 20)
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind:       EventToolAnnotation,
+		Channel:    ChannelIC,
+		Annotation: &Annotation{ToolName: "world:set-flag", Summary: "torch-lit set", OK: true},
+	}})
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind:       EventToolAnnotation,
+		Channel:    ChannelIC,
+		Annotation: &Annotation{ToolName: "resolve:attack", Summary: "target out of range", OK: false},
+	}})
+	got := view(a)
+	for _, want := range []string{"world:set-flag", "torch-lit set", "→", "resolve:attack", "✗"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("annotation strip should contain %q, view:\n%s", want, got)
+		}
+	}
+}
+
+func TestDiceBannerRenders(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 70, 20)
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind:    EventDice,
+		Channel: ChannelIC,
+		Dice: &DiceEvent{
+			Expr: "3d6+2", Dice: []int{4, 6, 2}, Modifier: 2, Total: 14, Outcome: "success",
+		},
+	}})
+	got := view(a)
+	for _, want := range []string{"3d6+2", "[4 6 2]", "+2", "= 14", "SUCCESS"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dice banner should contain %q, view:\n%s", want, got)
+		}
+	}
+	// The banner is centred inside the chat width.
+	if a.chatW < 1 {
+		t.Fatal("chat width not laid out")
+	}
+}
+
+func TestCtrlTTogglesChannel(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 60, 20)
+	if a.channel != ChannelIC || a.input.Prompt != "> " {
+		t.Fatalf("start: channel=%v prompt=%q", a.channel, a.input.Prompt)
+	}
+	press(t, a, ctrl('t'))
+	if a.channel != ChannelOOC {
+		t.Errorf("after ctrl+t channel = %v, want ChannelOOC", a.channel)
+	}
+	if a.input.Prompt != "ooc> " {
+		t.Errorf("OOC prompt = %q, want %q", a.input.Prompt, "ooc> ")
+	}
+	if got := view(a); !strings.Contains(got, "[OOC]") {
+		t.Errorf("header should show the active OOC channel, view:\n%s", got)
+	}
+	press(t, a, ctrl('t'))
+	if a.channel != ChannelIC || a.input.Prompt != "> " {
+		t.Errorf("second ctrl+t: channel=%v prompt=%q", a.channel, a.input.Prompt)
+	}
+}
+
+func TestCtrlMTogglesMetadataPanel(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	if a.panelOpen {
+		t.Fatal("panel should start closed")
+	}
+	press(t, a, ctrl('m'))
+	if !a.panelOpen {
+		t.Fatal("ctrl+m should open the panel")
+	}
+	got := view(a)
+	if !strings.Contains(got, "METADATA") {
+		t.Errorf("open panel should render its placeholder, view:\n%s", got)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) != 20 {
+		t.Errorf("panel open: view has %d lines, want 20", len(lines))
+	}
+	// The panel reserves roughly 30% of the width: the chat shrinks with it.
+	if a.chatW >= a.width {
+		t.Errorf("chat width %d should shrink below window width %d when the panel is open", a.chatW, a.width)
+	}
+	press(t, a, ctrl('m'))
+	if a.panelOpen {
+		t.Error("second ctrl+m should close the panel")
+	}
+	if strings.Contains(view(a), "METADATA") {
+		t.Error("closed panel should not render")
+	}
+}
+
+func TestSendRoutesToCurrentChannel(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 60, 20)
+
+	a.input.SetValue("hello there")
+	cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on non-empty input should produce a send command")
+	}
+	_ = cmd() // run the command: it calls driver.Send
+	if len(d.sends) != 1 || d.sends[0] != (sentRecord{ch: ChannelIC, text: "hello there"}) {
+		t.Fatalf("sends = %+v, want one IC send of %q", d.sends, "hello there")
+	}
+	if a.input.Value() != "" {
+		t.Errorf("input should clear after send, got %q", a.input.Value())
+	}
+
+	press(t, a, ctrl('t'))
+	a.input.SetValue("ooc remark")
+	cmd = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected a send command on OOC channel")
+	}
+	_ = cmd()
+	if len(d.sends) != 2 || d.sends[1] != (sentRecord{ch: ChannelOOC, text: "ooc remark"}) {
+		t.Fatalf("sends = %+v, want an OOC send of %q", d.sends, "ooc remark")
+	}
+}
+
+func TestSendErrorSurfacesAsErrorLine(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 60, 20)
+	d.sendErr = errors.New("harness offline")
+
+	a.input.SetValue("hello")
+	cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected a send command")
+	}
+	_, _ = a.Update(cmd()) // deliver the failure back into the app
+
+	got := view(a)
+	if !strings.Contains(got, "send failed") || !strings.Contains(got, "harness offline") {
+		t.Errorf("send error should appear in the transcript, view:\n%s", got)
+	}
+}
+
+func TestViewportAutoScrollFollowsNewEvents(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 40, 12) // body height 9
+	narrative := Event{
+		Kind:     EventNarrative,
+		Channel:  ChannelIC,
+		Markdown: "The corridor slopes downward, the air growing cold and still.\n\nSomewhere ahead, water drips in a steady rhythm.",
+	}
+	for i := 0; i < 8; i++ {
+		_, _ = a.Update(eventMsg{ev: narrative})
+	}
+	if !a.viewport.AtBottom() {
+		t.Fatal("new events should keep the viewport pinned to the bottom")
+	}
+	if !a.follow {
+		t.Fatal("follow mode should be on while at the bottom")
+	}
+
+	// Scrolling up suspends follow mode.
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if a.viewport.AtBottom() {
+		t.Fatal("pgup should scroll away from the bottom")
+	}
+	if a.follow {
+		t.Error("scrolling up should suspend follow mode")
+	}
+
+	// A new event must not yank the view back down.
+	_, _ = a.Update(eventMsg{ev: narrative})
+	if a.viewport.AtBottom() {
+		t.Error("event while scrolled up should not re-pin the viewport")
+	}
+
+	// Scrolling back to the bottom resumes follow mode.
+	for i := 0; i < 5 && !a.viewport.AtBottom(); i++ {
+		press(t, a, tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	if !a.viewport.AtBottom() {
+		t.Fatal("pgdown should reach the bottom")
+	}
+	if !a.follow {
+		t.Error("reaching the bottom should resume follow mode")
+	}
+	_, _ = a.Update(eventMsg{ev: narrative})
+	if !a.viewport.AtBottom() {
+		t.Error("follow mode should pin new events to the bottom again")
+	}
+}
+
+func TestWindowResizeRerendersEntries(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind:       EventToolAnnotation,
+		Channel:    ChannelIC,
+		Annotation: &Annotation{ToolName: "state:save", Summary: "session stored", OK: true},
+	}})
+	if a.entries[0].width != 80 {
+		t.Fatalf("entry rendered at width %d, want 80", a.entries[0].width)
+	}
+	_, _ = a.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	if a.entries[0].width != 40 {
+		t.Errorf("entry width after resize = %d, want 40", a.entries[0].width)
+	}
+	if w := lipgloss.Width(strings.SplitN(view(a), "\n", 2)[1]); w > 40 {
+		t.Errorf("transcript line wider than the new width: %d", w)
+	}
+}
+
+func TestQQuitsOnlyWithEmptyInput(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 60, 20)
+	a.input.SetValue("quiet")
+	cmd := press(t, a, key('q'))
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q must not quit while the input line has text")
+		}
+	}
+	if a.input.Value() != "quietq" {
+		t.Errorf("q should type into the input, got %q", a.input.Value())
+	}
+
+	a.input.Reset()
+	cmd = press(t, a, key('q'))
+	if cmd == nil {
+		t.Fatal("expected a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("q with empty input should quit")
+	}
+
+	cmd = press(t, a, ctrl('c'))
+	if cmd == nil {
+		t.Fatal("expected a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c should quit")
+	}
+}
+
+func TestInputHistory(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 60, 20)
+
+	a.input.SetValue("first message")
+	if cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+		_ = cmd()
+	}
+	a.input.SetValue("second message")
+	if cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+		_ = cmd()
+	}
+	if len(d.sends) != 2 {
+		t.Fatalf("sends = %+v, want 2", d.sends)
+	}
+
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyUp})
+	if a.input.Value() != "second message" {
+		t.Errorf("first up = %q, want %q", a.input.Value(), "second message")
+	}
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyUp})
+	if a.input.Value() != "first message" {
+		t.Errorf("second up = %q, want %q", a.input.Value(), "first message")
+	}
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyDown})
+	if a.input.Value() != "second message" {
+		t.Errorf("down = %q, want %q", a.input.Value(), "second message")
+	}
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyDown})
+	if a.input.Value() != "" {
+		t.Errorf("down past newest should clear, got %q", a.input.Value())
+	}
+
+	// Esc clears whatever is on the line.
+	a.input.SetValue("scratch")
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyEsc})
+	if a.input.Value() != "" {
+		t.Errorf("esc should clear the input, got %q", a.input.Value())
+	}
+}
+
+func TestDriverEventStream(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 60, 20)
+
+	d.events <- Event{Kind: EventNarrative, Channel: ChannelIC, Markdown: "The bell tolls twice."}
+	cmd := a.requestEvents()
+	if cmd == nil {
+		t.Fatal("expected a read command while the stream is open")
+	}
+	_, _ = a.Update(cmd())
+	if !strings.Contains(view(a), "bell tolls") {
+		t.Errorf("event from the driver should reach the transcript, view:\n%s", view(a))
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd = a.requestEvents()
+	if cmd == nil {
+		t.Fatal("expected a read command before the close is observed")
+	}
+	_, next := a.Update(cmd())
+	if !strings.Contains(view(a), "event stream closed") {
+		t.Errorf("closing the driver should be reported, view:\n%s", view(a))
+	}
+	if next != nil {
+		t.Error("a closed event stream must not be re-armed")
+	}
+}
+
+func TestLocalCommands(t *testing.T) {
+	t.Run("theme", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 20)
+		a.input.SetValue("/theme obsidian")
+		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if a.theme.Name != "obsidian" {
+			t.Errorf("theme = %q, want obsidian", a.theme.Name)
+		}
+		if !strings.Contains(view(a), "theme → obsidian") {
+			t.Errorf("theme change should be reported, view:\n%s", view(a))
+		}
+
+		a.input.SetValue("/theme nope")
+		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if !strings.Contains(view(a), "valid themes") {
+			t.Errorf("bad theme should list the valid ones, view:\n%s", view(a))
+		}
+	})
+
+	t.Run("clear", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 20)
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventSystem, Markdown: "old news"}})
+		if len(a.entries) == 0 {
+			t.Fatal("expected an entry before clearing")
+		}
+		a.input.SetValue("/clear")
+		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if len(a.entries) != 0 {
+			t.Errorf("/clear should empty the transcript, got %d entries", len(a.entries))
+		}
+		if !a.follow {
+			t.Error("/clear should re-arm follow mode")
+		}
+	})
+
+	t.Run("help", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 20)
+		a.input.SetValue("/help")
+		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		got := view(a)
+		for _, want := range []string{"/roll", "/theme", "ctrl+t"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("/help should mention %q, view:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("quit", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 20)
+		a.input.SetValue("/quit")
+		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("/quit should return a command")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("/quit should quit")
+		}
+	})
+
+	t.Run("harness commands route verbatim", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 60, 20)
+		a.input.SetValue("/roll 3d6+2")
+		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("/roll should be forwarded to the driver")
+		}
+		_ = cmd()
+		if len(d.sends) != 1 || d.sends[0].text != "/roll 3d6+2" {
+			t.Errorf("sends = %+v, want verbatim /roll 3d6+2", d.sends)
+		}
+	})
+
+	t.Run("parse errors surface", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 60, 20)
+		a.input.SetValue("/frobnicate")
+		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd != nil {
+			t.Error("unknown commands must not be sent")
+		}
+		if len(d.sends) != 0 {
+			t.Errorf("sends = %+v, want none", d.sends)
+		}
+		if !strings.Contains(view(a), "unknown command") {
+			t.Errorf("parse errors should be shown, view:\n%s", view(a))
+		}
+	})
+}
+
+func TestBackgroundColorAdaptsTheme(t *testing.T) {
+	a, _ := newTestApp(t, Options{Theme: "parchment"}, 60, 20)
+	if a.theme.Dark {
+		t.Fatal("parchment should start light-native")
+	}
+	_, _ = a.Update(tea.BackgroundColorMsg{Color: lipgloss.Color("#000000")})
+	if !a.theme.Dark {
+		t.Error("a dark terminal background report should flip parchment to its dark variant")
+	}
+}
+
+func TestEditorArgvFromEnv(t *testing.T) {
+	env := func(kv map[string]string) func(string) string {
+		return func(k string) string { return kv[k] }
+	}
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "VISUAL with arguments",
+			env:  map[string]string{"VISUAL": "code -w"},
+			want: []string{"code", "-w"},
+		},
+		{
+			name: "EDITOR fallback",
+			env:  map[string]string{"EDITOR": "vim"},
+			want: []string{"vim"},
+		},
+		{
+			name: "vi default",
+			env:  map[string]string{},
+			want: []string{"vi"},
+		},
+		{
+			name: "VISUAL wins over EDITOR",
+			env:  map[string]string{"VISUAL": "emacs", "EDITOR": "vim"},
+			want: []string{"emacs"},
+		},
+		{
+			name: "quoted path with spaces",
+			env:  map[string]string{"VISUAL": `'my editor' -f`},
+			want: []string{"my editor", "-f"},
+		},
+		{
+			name:    "unterminated quote",
+			env:     map[string]string{"VISUAL": `code "oops`},
+			wantErr: "unterminated",
+		},
+		{
+			name:    "trailing backslash",
+			env:     map[string]string{"VISUAL": `vi\`},
+			wantErr: "trailing backslash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := editorArgv(env(tt.env))
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("got %q, want error containing %q", got, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("editorArgv: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("argv[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestEditorResultLoadsInput(t *testing.T) {
+	t.Run("edited text loads and temp file is removed", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 20)
+		f, err := os.CreateTemp(t.TempDir(), "edit-*.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("a longer message\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = a.Update(editorFinishedMsg{path: f.Name()})
+		if a.input.Value() != "a longer message" {
+			t.Errorf("input = %q, want the edited text", a.input.Value())
+		}
+		if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("temp file should be removed, stat err = %v", err)
+		}
+	})
+
+	t.Run("editor failure becomes a system error line", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 20)
+		a.input.SetValue("keep me")
+		_, _ = a.Update(editorFinishedMsg{
+			err:  errors.New("exit status 1"),
+			path: filepath.Join(t.TempDir(), "missing.md"),
+		})
+		if a.input.Value() != "keep me" {
+			t.Errorf("input = %q, want it untouched after a failed edit", a.input.Value())
+		}
+		if !strings.Contains(view(a), "editor failed") {
+			t.Errorf("editor errors should be reported, view:\n%s", view(a))
+		}
+	})
+}
+
+func TestMetadataPanelRefreshPolicies(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 80, 30)
+
+	// Toggling the panel on fetches the snapshot.
+	d.md = Metadata{Scene: "Rope bridge at dusk"}
+	press(t, a, ctrl('m'))
+	if !strings.Contains(plain(view(a)), "Rope bridge at dusk") {
+		t.Errorf("panel should render the snapshot fetched on toggle, view:\n%s", plain(view(a)))
+	}
+
+	// Every processed event refreshes it.
+	d.md = Metadata{Scene: "Collapsed mine shaft"}
+	_, _ = a.Update(eventMsg{ev: Event{Kind: EventSystem, Channel: ChannelIC, Markdown: "the clock advances"}})
+	if !strings.Contains(plain(view(a)), "Collapsed mine shaft") {
+		t.Errorf("panel should refresh on every event, view:\n%s", plain(view(a)))
+	}
+
+	// The slow two-second tick refreshes it too.
+	d.md = Metadata{Scene: "Flooded reliquary"}
+	_, _ = a.Update(metadataTickMsg{})
+	if !strings.Contains(plain(view(a)), "Flooded reliquary") {
+		t.Errorf("panel should refresh on the slow tick, view:\n%s", plain(view(a)))
+	}
+
+	// Layout: the chat column shrinks, and nothing spills the window.
+	if a.chatW >= a.width {
+		t.Errorf("chat width %d should shrink below window width %d", a.chatW, a.width)
+	}
+	lines := strings.Split(plain(view(a)), "\n")
+	if len(lines) != 30 {
+		t.Errorf("panel open: view has %d lines, want 30", len(lines))
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > 80 {
+			t.Errorf("line wider than the window (%d cols): %q", lipgloss.Width(line), line)
+		}
+	}
+}
+
+func TestDiceEventRoutesThroughTheatre(t *testing.T) {
+	a, _ := newTestApp(t, Options{DiceAnimation: true}, 80, 24)
+	roll := rollEvent()
+	_, _ = a.Update(eventMsg{ev: Event{Kind: EventDice, Channel: ChannelIC, Dice: &roll}})
+
+	if !a.dice.Active() {
+		t.Fatal("the roll should go on stage")
+	}
+	if len(a.entries) != 0 {
+		t.Errorf("the banner joins the transcript only once the animation ends, got %d entries", len(a.entries))
+	}
+	got := plain(view(a))
+	for _, want := range []string{"3d6+2", "rolling"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("theatre row should contain %q, view:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "= 14") {
+		t.Errorf("the rolling view must not spoil the total, view:\n%s", got)
+	}
+
+	// The transcript keeps accepting events during the animation; they
+	// render after the theatre row.
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind: EventNarrative, Channel: ChannelIC, Markdown: "The gong sounds.",
+	}})
+	if len(a.entries) != 1 {
+		t.Fatalf("narrative should file immediately, got %d entries", len(a.entries))
+	}
+	got = plain(view(a))
+	rollAt, narrAt := strings.Index(got, "rolling"), strings.Index(got, "gong")
+	if rollAt < 0 || narrAt < 0 || rollAt > narrAt {
+		t.Errorf("events should render after the animating roll (roll=%d, narrative=%d):\n%s",
+			rollAt, narrAt, got)
+	}
+
+	// Drive the animation to completion with synthetic ticks.
+	for i := 0; i < diceRollingTicks; i++ {
+		_, _ = a.Update(diceTickMsg{})
+	}
+	for i := 0; i < len(roll.Dice); i++ {
+		_, _ = a.Update(diceSettleMsg{})
+	}
+	if a.dice.phase != diceResult {
+		t.Fatalf("phase = %v, want result", a.dice.phase)
+	}
+	got = plain(view(a))
+	for _, want := range []string{"SUCCESS", "= 14"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("held banner should contain %q, view:\n%s", want, got)
+		}
+	}
+	if len(a.entries) != 1 {
+		t.Errorf("the roll is not filed while its banner is held, got %d entries", len(a.entries))
+	}
+
+	// The finish flushes the banner at the position the roll arrived.
+	_, _ = a.Update(diceFinishMsg{})
+	if a.dice.Active() {
+		t.Error("the theatre should be idle after the flush")
+	}
+	if len(a.entries) != 2 {
+		t.Fatalf("after flush: %d entries, want 2", len(a.entries))
+	}
+	if a.entries[0].ev.Kind != EventDice {
+		t.Error("the roll should be filed before the narrative that arrived during the animation")
+	}
+	if a.entries[1].ev.Kind != EventNarrative {
+		t.Error("the narrative should stay after the roll")
+	}
+	got = plain(view(a))
+	if strings.Contains(got, "rolling") {
+		t.Errorf("no roll-in-progress should remain after the flush, view:\n%s", got)
+	}
+	for _, want := range []string{"3d6+2", "[4 6 2]", "+2", "= 14", "SUCCESS"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("filed banner should contain %q, view:\n%s", want, got)
+		}
+	}
+}
+
+func TestDiceAnimationOffRendersImmediately(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 24) // DiceAnimation defaults to false
+	roll := rollEvent()
+	_, _ = a.Update(eventMsg{ev: Event{Kind: EventDice, Channel: ChannelIC, Dice: &roll}})
+
+	if a.dice.Active() {
+		t.Error("no roll should stay on stage when animation is off")
+	}
+	if len(a.entries) != 1 {
+		t.Fatalf("the banner should join the transcript at once, got %d entries", len(a.entries))
+	}
+	got := plain(view(a))
+	if strings.Contains(got, "rolling") {
+		t.Errorf("animation off must show no roll-in-progress, view:\n%s", got)
+	}
+	for _, want := range []string{"3d6+2", "[4 6 2]", "+2", "= 14", "SUCCESS"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instant banner should contain %q, view:\n%s", want, got)
+		}
+	}
+}
+
+func TestSecondRollPreemptsRunningTheatre(t *testing.T) {
+	a, _ := newTestApp(t, Options{DiceAnimation: true}, 80, 24)
+	first := rollEvent()
+	_, _ = a.Update(eventMsg{ev: Event{Kind: EventDice, Channel: ChannelIC, Dice: &first}})
+	second := DiceEvent{
+		Expr: "1d20", Dice: []int{17}, Modifier: 0, Total: 17, Outcome: "critical",
+	}
+	_, _ = a.Update(eventMsg{ev: Event{Kind: EventDice, Channel: ChannelIC, Dice: &second}})
+
+	// The running roll is filed at once; the new one takes the stage.
+	if len(a.entries) != 1 || a.entries[0].ev.Dice == nil || a.entries[0].ev.Dice.Expr != "3d6+2" {
+		t.Fatalf("preempted roll should be filed first, entries = %+v", a.entries)
+	}
+	if !a.dice.Active() || a.dice.ev.Expr != "1d20" {
+		t.Fatalf("the new roll should be on stage, active=%v expr=%q", a.dice.Active(), a.dice.ev.Expr)
+	}
+
+	for i := 0; i < diceRollingTicks; i++ {
+		_, _ = a.Update(diceTickMsg{})
+	}
+	for i := 0; i < len(second.Dice); i++ {
+		_, _ = a.Update(diceSettleMsg{})
+	}
+	_, _ = a.Update(diceFinishMsg{})
+	if len(a.entries) != 2 {
+		t.Fatalf("after the second flush: %d entries, want 2", len(a.entries))
+	}
+	if a.entries[1].ev.Dice == nil || a.entries[1].ev.Dice.Expr != "1d20" {
+		t.Error("the second roll should be filed after the first")
+	}
+}
+
+func TestPlayerEchoRendersYou(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 80, 20)
+	you := a.theme.Styles.Speaker.Render("You")
+
+	// GM narrative carries no player tag.
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind: EventNarrative, Channel: ChannelIC, Markdown: "The bell tolls twice.",
+	}})
+	if strings.Contains(view(a), you) {
+		t.Error("GM narrative must not be tagged as the player")
+	}
+
+	// The player sends; the TUI never echoes its own input.
+	a.input.SetValue("the door is barred.")
+	if cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+		_ = cmd()
+	}
+	if len(d.sends) != 1 {
+		t.Fatalf("sends = %+v, want one send", d.sends)
+	}
+	if strings.Contains(view(a), you) {
+		t.Error("the TUI must not tag its own input before the harness echoes it")
+	}
+
+	// The harness echoes the message back through Events: tagged "You".
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind: EventNarrative, Channel: ChannelIC, Markdown: "the door is barred.",
+	}})
+	if !strings.Contains(view(a), you) {
+		t.Errorf("the harness echo should render with the You tag, view:\n%s", plain(view(a)))
+	}
+
+	// Later narrative is not tagged, and the echo is consumed exactly once.
+	_, _ = a.Update(eventMsg{ev: Event{
+		Kind: EventNarrative, Channel: ChannelIC, Markdown: "Indeed it is.",
+	}})
+	if n := strings.Count(view(a), you); n != 1 {
+		t.Errorf("exactly one You tag expected, got %d", n)
+	}
+}
