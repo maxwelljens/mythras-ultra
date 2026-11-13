@@ -1,0 +1,19 @@
+# Binaries
+/bin/
+/dist/
+myul
+*.exe
+
+# Test artifacts
+*.out
+*.test
+coverage.*
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+
+# Local config/state (never commit user data)
+*.local.toml
+/tmp/
