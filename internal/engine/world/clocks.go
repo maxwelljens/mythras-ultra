@@ -49,11 +49,15 @@ var (
 	// ErrClockComplete reports an advancement that would over-fill a
 	// clock, or one applied to a clock that is already full.
 	ErrClockComplete = errors.New("world: clock complete")
+	// ErrClockExists reports an attempt to create a clock whose name is
+	// already taken.
+	ErrClockExists = errors.New("world: clock already exists")
 )
 
 // AddClock creates a clock with the given name and capacity (at least one
 // segment), trimmed of surrounding whitespace, erroring if the name is
-// empty or already taken. The optional onComplete strings become the
+// empty or already taken ([ErrClockExists] wraps the duplicate-name
+// refusal). The optional onComplete strings become the
 // clock's [Clock.OnComplete] narration hooks; they are copied, so the
 // caller's slice may be reused freely. Tags and further customisation are
 // set by assigning the exported fields on the created clock.
@@ -69,7 +73,7 @@ func (w *World) AddClock(name string, segments int, onComplete ...string) error 
 		w.Clocks = make(map[string]*Clock)
 	}
 	if _, exists := w.Clocks[name]; exists {
-		return fmt.Errorf("world: clock %q already exists", name)
+		return fmt.Errorf("%w: %q", ErrClockExists, name)
 	}
 	w.Clocks[name] = &Clock{
 		Name:       name,
