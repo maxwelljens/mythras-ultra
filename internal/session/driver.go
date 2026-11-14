@@ -65,7 +65,10 @@ func (s *Session) Send(ctx context.Context, ch tui.Channel, text string) error {
 // command runs on the session's current channel (the last-used IC/OOC
 // mode). The error is non-nil when the session is closed or the name is
 // empty; an unknown name is reported back through Events as an error line
-// (session-loop.md "Commands").
+// (session-loop.md "Commands"). The channel check's "confirm" answer is
+// the one exception to the queue: while a hold is pending it is handed
+// straight to the waiting runner, and a confirm with no hold behind it
+// comes back as a "nothing pending" error line.
 func (s *Session) Command(name string, args ...string) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("session: refusing an unnamed command")
@@ -77,6 +80,21 @@ func (s *Session) Command(name string, args ...string) error {
 	case <-s.quit:
 		return ErrClosed
 	default:
+	}
+	if name == "confirm" && s.held.Load() {
+		// The runner is blocked in waitConfirm: enqueueing would make
+		// it report "nothing pending" instead of answering. A malformed
+		// answer is refused rather than read as "n", which would
+		// silently discard the held message.
+		if len(args) != 1 || (args[0] != "y" && args[0] != "n") {
+			return errors.New(`session: confirm expects "y" or "n"`)
+		}
+		select {
+		case s.confirmCh <- args[0]:
+			return nil
+		default:
+			return errors.New("session: a confirmation answer is already pending")
+		}
 	}
 	select {
 	case s.inputs <- input{ch: s.LastChannel(), cmd: name, args: args}:

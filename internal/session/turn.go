@@ -34,7 +34,9 @@ const (
 // sessionCommands lists the commands [Session.Command] understands, in
 // help-output order; Command reports the same list on an unknown name
 // (the TUI's palette keeps its own catalogue — tui.PaletteCommands).
-var sessionCommands = []string{"roll", "save", "recap", "meta"}
+// "confirm" is the channel check's y/n answer: it never reaches the
+// palette, because only a pending hold accepts it.
+var sessionCommands = []string{"roll", "save", "recap", "meta", "confirm"}
 
 // channelTagRe matches a channel marker a model sometimes writes at the
 // very start of its reply ("[IC] The door…", "[ooc]: sure"). It is anchored
@@ -118,15 +120,23 @@ func (s *Session) run() {
 }
 
 // process routes one queued input: a local command runs immediately instead
-// of through the model, everything else is a player message — echoed
-// verbatim (recording it as a player chat line) and then run as a model
-// turn on the input's channel (session-loop.md "Turn loop" step 1a–1b).
-// Player text is never parsed for commands: prose that looks like "/save"
-// is prose, and reaches the model as typed.
+// of through the model, everything else is a player message — first held
+// for a channel-check confirmation when the decision model objects
+// (channelGate), otherwise echoed verbatim (recording it as a player chat
+// line) and run as a model turn on the input's channel (session-loop.md
+// "Turn loop" step 1a–1b). Player text is never parsed for commands:
+// prose that looks like "/save" is prose, and reaches the model as typed.
+// A message the player answers "n" to is discarded without a trace — no
+// echo, no history entry, nothing recorded.
 func (s *Session) process(in input) {
 	if in.cmd != "" {
 		s.runCommand(in.ch, in.cmd, in.args)
 		return
+	}
+	if question, ok := s.channelGate(in.ch, in.text); ok {
+		if !s.waitConfirm(in.ch, question, in.text) {
+			return
+		}
 	}
 	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text, Player: true}, true)
 	s.runTurn(in.ch, in.text)
@@ -137,7 +147,9 @@ func (s *Session) process(in input) {
 // the old slash commands had — roll through the roll_dice tool, save the
 // session, replay the recaps, dump the panel snapshot — each reported with
 // its own system or error event. An unknown command is an error line
-// listing the known ones; no model call ever happens here.
+// listing the known ones; no model call ever happens here. A "confirm"
+// answer only ever reaches this switch without a pending hold (a hold
+// takes it directly in Command), so it reports "nothing pending".
 func (s *Session) runCommand(ch tui.Channel, name string, args []string) {
 	switch name {
 	case "roll":
@@ -154,6 +166,9 @@ func (s *Session) runCommand(ch tui.Channel, name string, args []string) {
 		s.cmdRecap(ch)
 	case "meta":
 		s.cmdMeta(ch)
+	case "confirm":
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
+			Markdown: "nothing pending — no message is waiting for a channel check"}, false)
 	default:
 		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
 			"unknown command %q — commands: %s", name,

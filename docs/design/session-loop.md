@@ -15,9 +15,10 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
   parsed for commands: prose that looks like `/save` reaches the model as
   prose.
 - `Command(name, args...)` — one named local command (`roll`, `save`,
-  `recap`, `meta`), enqueued on the same single-runner goroutine as
-  messages. Commands carry no player text: they produce no echo, never
-  reach the model, and run on the session's current channel; an unknown
+  `recap`, `meta`, plus the channel check's `confirm` answer), enqueued on
+  the same single-runner goroutine as messages. Commands carry no player
+  text: they produce no echo, never reach the model, and run on the
+  session's current channel; an unknown
   name comes back as an `EventError` listing the known commands. The TUI
   drives it from the command palette (ctrl+p); view-only palette actions
   (character sheet, clear, help, editor, quit, channel switch, themes)
@@ -75,6 +76,32 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
 4. OOC channel: same loop but tag the message `[ooc]`; the prompt instructs
    the GM to reply out of character and perform no moves unless the player
    confirms.
+
+## Channel check (confirm)
+
+Every player `Send` is checked before its echo, on the runner goroutine and
+synchronously — ahead of step 1a. With
+`[decision] channel_check` on (default), the runner asks the decision model
+`decide.Question{State: <mode sentence + the message>, Question: "Which
+channel does this player message belong to?", Options: ["in-character",
+"out-of-character"]}` — the current channel names the option that counts as
+correct. The message is held only when all three hold: the verdict differs
+from the channel, its confidence reaches `channelCheckMinConfidence` (0.7),
+and the text is at least `channelCheckMinLen` (32) bytes; a decision model
+that is disabled, unreachable or erroring passes silently, so the check can
+never block a message or fail a turn.
+
+A held message is not echoed, not appended to history and not recorded: the
+runner emits one `EventConfirm` (Markdown = the exact "N/y" question for the
+current channel, `Event.ConfirmText` = the held text) and waits for
+`Command("confirm", "y"|"n")`. **y** continues exactly as a Send that was
+never held (echo → history → turn); **n** discards it without a trace.
+Inputs arriving meanwhile keep queueing on the buffered channel as before,
+`Close` drops a pending hold without hanging, and a confirm with no hold
+behind it comes back as a "nothing pending" error line. The TUI answers from
+the input line: while the confirm stands the prompt reads `N/y ▸ `, y/Y
+sends "y", n/N/enter/esc sends "n" and returns the held text to the input
+line unsent, every other key is ignored (ctrl+c still quits).
 
 ## Chat persistence & replay
 

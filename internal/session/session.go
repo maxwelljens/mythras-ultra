@@ -105,6 +105,12 @@ type Config struct {
 	// Decide is the optional decision model behind the advisory decide
 	// tool; nil when disabled (the registry holds the same pointer).
 	Decide *decide.Client
+	// ChannelCheck runs the decision model on every player message
+	// before its echo, holding one whose verdict disagrees with the
+	// current channel for a N/y confirmation (config decision.channel_check,
+	// default true). False — the zero value — skips the decide call
+	// entirely; without a Decide client the check passes silently.
+	ChannelCheck bool
 	// Overrides selects the system prompt template.
 	Overrides prompts.Overrides
 	// SessionsDir holds one directory per session (<SessionsDir>/<id>/);
@@ -159,6 +165,7 @@ func (cfg Config) build(st *resolve.State) *Session {
 		client:        cfg.Client,
 		registry:      cfg.Registry,
 		decision:      cfg.Decide,
+		channelCheck:  cfg.ChannelCheck,
 		overrides:     cfg.Overrides,
 		sessionsDir:   cfg.SessionsDir,
 		autosave:      cfg.Autosave,
@@ -169,6 +176,7 @@ func (cfg Config) build(st *resolve.State) *Session {
 		contextWindow: cfg.ContextWindow,
 		events:        make(chan tui.Event, eventBuffer),
 		inputs:        make(chan input, inputQueue),
+		confirmCh:     make(chan string, 1),
 		ctx:           ctx,
 		cancel:        cancel,
 		quit:          make(chan struct{}),
@@ -194,6 +202,9 @@ type Session struct {
 	// decision is the optional decision model, kept for the meta
 	// command; the registry was built with the same pointer.
 	decision *decide.Client
+	// channelCheck runs the pre-echo channel gate (Config ChannelCheck);
+	// false skips the decide call entirely.
+	channelCheck bool
 	// overrides selects the system prompt template.
 	overrides prompts.Overrides
 	// history is the conversation (system prompt excluded): user,
@@ -253,6 +264,14 @@ type Session struct {
 	quit, done chan struct{}
 	// closed records the first Close so later calls are no-ops.
 	closed atomic.Bool
+	// held reports a pending channel-check hold to [Session.Command],
+	// which answers it on confirmCh instead of the input queue. Written
+	// only by the runner (waitConfirm), read from the command goroutine.
+	held atomic.Bool
+	// confirmCh carries the y/n answer of the one hold that can exist at
+	// a time; capacity one, because Command refuses a second unanswered
+	// answer rather than blocking.
+	confirmCh chan string
 }
 
 // New starts a fresh session: it adopts [Config.State] when the command
