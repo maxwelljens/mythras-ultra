@@ -59,8 +59,9 @@ See `docs/ARCHITECTURE.md` §2. Quick orientation:
 - Table-driven tests; fixed `dice.NewRand(seed)`; assert on `Result.Facts` and
   audit, not just error/success.
 - Golden files under `testdata/` — regenerate with `go test ./... -update`.
-- Mock session: `harness.ScriptedClient` replays canned GM turns
-  (`testdata/mocksession/script.json`); assert final `state.json` snapshot.
+- Mock session: `llm.ScriptedClient` replays canned GM turns
+  (`testdata/mocksession/script.json`); assert the final in-memory state and
+  that every registered tool was exercised (the coverage rule).
 
 ## Commits
 

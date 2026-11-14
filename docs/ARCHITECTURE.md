@@ -34,6 +34,7 @@ internal/
     llm/             LLM Client interface, fantasy adapter, scripted mock
     prompts/         GM prompt assembly (embedded defaults + config overrides)
     decide/          tev1/Ollama decision-model client (optional, fallback)
+  session/           game loop: turns, tool dispatch, compaction; implements tui.Driver
   tui/               Bubbletea UI: chat, dice theatre, HUD, metadata, themes
 docs/                architecture, rules digest, research notes
 testdata/            mock-session fixtures, golden files
@@ -143,22 +144,25 @@ test surface.
 ### 6.1 Tools
 
 `Tool{Name, Description, JSONSchema, Handler}`. Registry exposes schemas to
-the LLM and dispatches calls. Mandatory families:
-
-- `rules_lookup(query)` — search embedded rulebook/digest; returns excerpts.
-- `roll_dice(expr, reason)`, `skill_test`, `opposed_test` — deterministic rolls.
-- `get_character`, `create_character`, `update_character` (levelled creation).
-- `get_npc`, `create_npc`, `update_npc`, `list_npcs`.
-- `inventory_add/remove/equip`, `check_encumbrance`.
-- `combat_start`, `combat_status`, `spend_ap`, `resolve_attack`,
-  `apply_damage`, `heal`, `combat_end`.
-- `world_get`, `world_set_flag`, `can_acquire(item, rarity)`, `advance_clock`,
-  `advance_time`.
-- `set_scene`, `note` (persistent GM annotations), `ooc_check` (ask player).
-- `end_session_recap` / `session_recap`.
+the LLM and dispatches calls.
 
 Tool results: `{ ok, summary, facts[], audit }`. Errors are structured
-(`IMPOSSIBLE: ...` with reason) so the GM can narrate a refusal.
+(`IMPOSSIBLE: ...` with reason) so the GM can narrate a refusal. The complete
+37-tool catalogue (names, args, backing moves) lives in
+`docs/design/harness-surface.md` and is enforced by the registry tests and
+the mock-session coverage rule; families in brief:
+
+- Rules & advice: `rules_lookup`, `rules_section`, `decide` (advisory).
+- Dice & tests: `roll_dice`, `skill_test`, `opposed_test`, `luck_point`.
+- Characters: `create_character` (PC or NPC via `pc` flag), `finalize_character`,
+  `get_character`, `update_character`, `list_characters`, `skill_advance`.
+- Inventory: `inventory_add`, `inventory_remove`, `equip`, `check_encumbrance`
+  (advisory — the rulebook has no encumbrance rules).
+- Combat: `combat_start`, `combat_status`, `spend_ap`, `can_act`, `next_round`,
+  `resolve_attack`, `apply_special_effect`, `apply_damage`, `heal`, `combat_end`.
+- World & continuity: `world_get`, `world_set_flag`, `can_acquire`,
+  `add_clock`, `advance_clock`, `advance_time`, `set_scene`, `note`,
+  `session_recap`, `end_session_recap`.
 
 ### 6.2 LLM layer (`harness/llm`)
 
@@ -229,12 +233,14 @@ Key sections: `[llm]` (provider, model, api_key_env, base_url), `[decision]`
 
 - Unit tests per engine package with fixed seeds; table-driven.
 - Golden tests for `codex` search results and prompt assembly.
-- **Mock session** (`internal/harness/harness_test.go` +
-  `testdata/mocksession/`): a `ScriptedClient` drives a complete game —
-  character creation, exploration, skill tests, combat encounter, inventory
-  and world-flag changes, advancement — asserting on the resulting `state.json`
-  snapshot and log. Every registered tool must appear at least once in the
-  mock session (coverage check walks the registry).
+- **Mock session** (`internal/harness/mocksession_test.go` +
+  `testdata/mocksession/script.json`, fixture format `seed`/`turns`/`expect`):
+  `llm.ScriptedClient` replays canned GM turns through
+  `tools.Registry.Dispatch` over a `resolve.State` — character creation,
+  exploration, skill tests, combat encounter, inventory and world-flag
+  changes, advancement — asserting the resulting final state. Every
+  registered tool must appear at least once in a script's
+  `expect.tools_used` (coverage check walks the registry).
 - TUI model unit tests: Update/View transitions without a real terminal.
 - `go test ./...` must pass with no network and no Ollama (fakes only).
 
