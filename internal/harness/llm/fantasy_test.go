@@ -382,6 +382,108 @@ func TestFantasyStreamErrorPartWrapsProvider(t *testing.T) {
 	}
 }
 
+// TestResolveTargetProviderMapping pins the provider → adapter mapping:
+// the fantasy-native ids keep their native adapters, every other id
+// resolves through the embedded catalog and maps by the API type it
+// declares (endpoint precedence: explicit config > catalog), and shapes no
+// adapter can reach fail naming the provider instead of silently
+// misconfiguring.
+func TestResolveTargetProviderMapping(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         Config
+		wantAdapter string
+		wantBaseURL string // checked only when non-empty
+		wantErr     string // substring, "" means the mapping must succeed
+	}{
+		{name: "openai native", cfg: Config{Provider: "openai"}, wantAdapter: "openai"},
+		{name: "anthropic native", cfg: Config{Provider: "anthropic"}, wantAdapter: "anthropic"},
+		{name: "openrouter native", cfg: Config{Provider: "openrouter"}, wantAdapter: "openrouter"},
+		{
+			name:        "openaicompat native",
+			cfg:         Config{Provider: "openaicompat", BaseURL: "http://localhost:11434/v1"},
+			wantAdapter: "openaicompat",
+			wantBaseURL: "http://localhost:11434/v1",
+		},
+		{
+			name:        "deepseek maps to openaicompat",
+			cfg:         Config{Provider: "deepseek"},
+			wantAdapter: "openaicompat",
+			wantBaseURL: "https://api.deepseek.com/v1",
+		},
+		{
+			name:        "deepseek id is case-insensitive",
+			cfg:         Config{Provider: "DeepSeek"},
+			wantAdapter: "openaicompat",
+			wantBaseURL: "https://api.deepseek.com/v1",
+		},
+		{
+			name:        "opencode-go maps to openaicompat",
+			cfg:         Config{Provider: "opencode-go"},
+			wantAdapter: "openaicompat",
+			wantBaseURL: "https://opencode.ai/zen/go/v1",
+		},
+		{
+			name:        "explicit base url beats the catalog endpoint",
+			cfg:         Config{Provider: "deepseek", BaseURL: "https://proxy.example/v1"},
+			wantAdapter: "openaicompat",
+			wantBaseURL: "https://proxy.example/v1",
+		},
+		{
+			// minimax speaks the Anthropic messages API, so it lands on
+			// the anthropic adapter rather than being rejected.
+			name:        "anthropic-type provider maps to anthropic",
+			cfg:         Config{Provider: "minimax"},
+			wantAdapter: "anthropic",
+		},
+		{
+			name:    "responses type has no adapter",
+			cfg:     Config{Provider: "cortecs"},
+			wantErr: "API type",
+		},
+		{
+			// azure's endpoint is an unresolved $ENV placeholder.
+			name:    "placeholder endpoint without base_url",
+			cfg:     Config{Provider: "azure"},
+			wantErr: "no usable base URL",
+		},
+		{
+			name:    "unknown provider",
+			cfg:     Config{Provider: "not-a-provider"},
+			wantErr: "unsupported provider",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveTarget(tc.cfg)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("resolveTarget(%+v) = %+v, want error %q", tc.cfg, got, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want substring %q", err, tc.wantErr)
+				}
+				if tc.wantErr == "unsupported provider" && !strings.Contains(err.Error(), tc.cfg.Provider) {
+					t.Errorf("error %q does not name the provider %q", err, tc.cfg.Provider)
+				}
+				if tc.wantErr == "API type" && !strings.Contains(err.Error(), tc.cfg.Provider) {
+					t.Errorf("error %q does not name the provider %q", err, tc.cfg.Provider)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTarget(%+v): %v", tc.cfg, err)
+			}
+			if got.adapter != tc.wantAdapter {
+				t.Errorf("adapter = %q, want %q", got.adapter, tc.wantAdapter)
+			}
+			if tc.wantBaseURL != "" && got.baseURL != tc.wantBaseURL {
+				t.Errorf("baseURL = %q, want %q", got.baseURL, tc.wantBaseURL)
+			}
+		})
+	}
+}
+
 func TestNewFantasyClientConfig(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -409,8 +511,10 @@ func TestNewFantasyClientConfig(t *testing.T) {
 			wantErr: "model id is required",
 		},
 		{
+			// groq IS in the embedded catalog now (it maps to
+			// openaicompat); only an id nothing knows fails here.
 			name:    "unknown provider",
-			cfg:     Config{Provider: "groq", Model: "llama", APIKey: "k"},
+			cfg:     Config{Provider: "not-a-provider", Model: "llama", APIKey: "k"},
 			wantErr: "unsupported provider",
 		},
 		{
@@ -429,6 +533,24 @@ func TestNewFantasyClientConfig(t *testing.T) {
 		{
 			name: "openaicompat local server without key",
 			cfg:  Config{Provider: "openaicompat", Model: "llama3.1", BaseURL: "http://localhost:11434/v1"},
+		},
+		{
+			// deepseek is not a native adapter: it maps to openaicompat
+			// through the catalog, but still demands its declared key.
+			name:    "catalog provider missing key",
+			cfg:     Config{Provider: "deepseek", Model: "deepseek-chat"},
+			wantErr: "missing API key",
+		},
+		{
+			name: "catalog provider with key",
+			cfg:  Config{Provider: "deepseek", Model: "deepseek-chat", APIKey: "k"},
+		},
+		{
+			// An API type no adapter speaks fails before any credential
+			// check, naming the provider and its type.
+			name:    "unsupported api type",
+			cfg:     Config{Provider: "cortecs", Model: "cortecs-model", APIKey: "k"},
+			wantErr: "API type",
 		},
 	}
 	for _, tc := range cases {

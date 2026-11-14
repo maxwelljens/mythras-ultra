@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/openai"
@@ -28,19 +30,25 @@ type modelClient interface {
 // Keys are passed explicitly: this package never reads the environment (the
 // app layer resolves `api_key_env` and hands the value in).
 type Config struct {
-	// Provider names the fantasy provider package. Supported: "openai",
-	// "anthropic", "openrouter" and "openaicompat" (the OpenAI-compatible
-	// path for local or self-hosted servers such as Ollama's /v1 API).
+	// Provider names the provider to talk to. The fantasy-native adapters
+	// are "openai", "anthropic", "openrouter" and "openaicompat" (the
+	// OpenAI-compatible path for local or self-hosted servers such as
+	// Ollama's /v1 API). Any other id in the embedded catwalk catalog —
+	// "deepseek", "groq", "opencode-go", … — resolves through
+	// [ResolveProvider] and maps onto an adapter by the API type the
+	// catalog declares (see [resolveTarget]).
 	Provider string
 	// Model is the provider-specific model id passed to
 	// [fantasy.Provider.LanguageModel].
 	Model string
-	// APIKey is the provider credential. Required for "openai",
-	// "anthropic" and "openrouter"; optional for "openaicompat", whose
-	// local servers usually need none. Missing required keys fail with
-	// [ErrNoAPIKey].
+	// APIKey is the provider credential. Required by the native
+	// "openai", "anthropic" and "openrouter" adapters and by every
+	// catalog provider that declares an API-key env var; optional for
+	// native "openaicompat", whose local servers usually need none.
+	// Missing required keys fail with [ErrNoAPIKey].
 	APIKey string
-	// BaseURL overrides the provider endpoint. Honoured by "openai",
+	// BaseURL overrides the provider endpoint — explicit config always
+	// wins over the catalog's endpoint. Honoured by "openai",
 	// "anthropic" and "openaicompat"; "openrouter" exposes no base-URL
 	// option and rejects a non-empty value instead of ignoring it.
 	BaseURL string
@@ -90,35 +98,45 @@ func NewFantasyClient(cfg Config) (*FantasyClient, error) {
 	return &FantasyClient{provider: provider, modelID: cfg.Model}, nil
 }
 
+// providerTarget is the resolved construction target for a [Config]: which
+// fantasy adapter to build, the endpoint to point it at ("" lets the
+// adapter's own default stand), and whether the provider requires an API
+// key before the adapter is built.
+type providerTarget struct {
+	adapter  string
+	baseURL  string
+	needsKey bool
+}
+
 // newProvider constructs the fantasy provider package for cfg.
 func newProvider(cfg Config) (fantasy.Provider, error) {
+	target, err := resolveTarget(cfg)
+	if err != nil {
+		return nil, err
+	}
 	providerName := strings.ToLower(strings.TrimSpace(cfg.Provider))
-	switch providerName {
-	case "openai":
+	if target.needsKey {
 		if err := requireAPIKey(providerName, cfg.APIKey); err != nil {
 			return nil, err
 		}
+	}
+	switch target.adapter {
+	case "openai":
 		opts := []openai.Option{openai.WithAPIKey(cfg.APIKey)}
-		if cfg.BaseURL != "" {
-			opts = append(opts, openai.WithBaseURL(cfg.BaseURL))
+		if target.baseURL != "" {
+			opts = append(opts, openai.WithBaseURL(target.baseURL))
 		}
 		provider, err := openai.New(opts...)
 		return wrapProvider(providerName, provider, err)
 	case "anthropic":
-		if err := requireAPIKey(providerName, cfg.APIKey); err != nil {
-			return nil, err
-		}
 		opts := []anthropic.Option{anthropic.WithAPIKey(cfg.APIKey)}
-		if cfg.BaseURL != "" {
-			opts = append(opts, anthropic.WithBaseURL(cfg.BaseURL))
+		if target.baseURL != "" {
+			opts = append(opts, anthropic.WithBaseURL(target.baseURL))
 		}
 		provider, err := anthropic.New(opts...)
 		return wrapProvider(providerName, provider, err)
 	case "openrouter":
-		if err := requireAPIKey(providerName, cfg.APIKey); err != nil {
-			return nil, err
-		}
-		if cfg.BaseURL != "" {
+		if target.baseURL != "" {
 			return nil, fmt.Errorf("llm: provider %q does not support a custom base URL", providerName)
 		}
 		provider, err := openrouter.New(openrouter.WithAPIKey(cfg.APIKey))
@@ -130,16 +148,78 @@ func newProvider(cfg Config) (fantasy.Provider, error) {
 		if cfg.APIKey != "" {
 			opts = append(opts, openaicompat.WithAPIKey(cfg.APIKey))
 		}
-		if cfg.BaseURL != "" {
-			opts = append(opts, openaicompat.WithBaseURL(cfg.BaseURL))
+		if target.baseURL != "" {
+			opts = append(opts, openaicompat.WithBaseURL(target.baseURL))
 		}
 		provider, err := openaicompat.New(opts...)
 		return wrapProvider(providerName, provider, err)
 	default:
-		return nil, fmt.Errorf(
-			"llm: unsupported provider %q (supported: openai, anthropic, openrouter, openaicompat)",
+		// Unreachable: resolveTarget only ever names those four adapters.
+		return nil, fmt.Errorf("llm: internal: unknown fantasy adapter %q for provider %q",
+			target.adapter, cfg.Provider)
+	}
+}
+
+// resolveTarget maps cfg.Provider onto a fantasy adapter and endpoint.
+//
+// The four fantasy-native ids ("openai", "anthropic", "openrouter",
+// "openaicompat") use their own adapter with the explicitly configured
+// base URL only. Every other id is looked up in the embedded catwalk
+// catalog and mapped by the API type it speaks: "completions"
+// (OpenAI-compatible) → "openaicompat", "messages" (Anthropic) →
+// "anthropic", both pointed at cfg.BaseURL when set, else the catalog's
+// endpoint. An API type no adapter in this build speaks (e.g. "responses")
+// and an endpoint the catalog leaves empty or as an unresolved "$ENV"
+// placeholder both fail with an error naming the provider — no silent
+// misconfiguration.
+func resolveTarget(cfg Config) (providerTarget, error) {
+	name := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	switch name {
+	case "openai", "anthropic", "openrouter":
+		return providerTarget{adapter: name, baseURL: cfg.BaseURL, needsKey: true}, nil
+	case "openaicompat":
+		return providerTarget{adapter: name, baseURL: cfg.BaseURL}, nil
+	}
+	info, err := ResolveProvider(name)
+	if err != nil {
+		return providerTarget{}, fmt.Errorf(
+			"llm: unsupported provider %q (supported: openai, anthropic, openrouter, openaicompat, or an embedded catalog provider such as deepseek, groq, opencode-go)",
 			cfg.Provider)
 	}
+	var adapter string
+	switch info.Type {
+	case string(catwalk.TypeCompletions):
+		adapter = "openaicompat"
+	case string(catwalk.TypeMessages):
+		adapter = "anthropic"
+	default:
+		return providerTarget{}, fmt.Errorf(
+			"llm: provider %q (%s) speaks the %q API type, which no adapter in this build supports (supported: %q OpenAI-compatible, %q Anthropic messages)",
+			info.Name, info.ID, info.Type, catwalk.TypeCompletions, catwalk.TypeMessages)
+	}
+	// Endpoint precedence: explicit config > the catalog's API endpoint.
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = info.BaseURL
+	}
+	if !isHTTPURL(baseURL) {
+		return providerTarget{}, fmt.Errorf(
+			"llm: provider %q has no usable base URL (%q) — set base_url in the config to the provider's endpoint",
+			info.Name, baseURL)
+	}
+	return providerTarget{
+		adapter:  adapter,
+		baseURL:  baseURL,
+		needsKey: info.APIKeyEnv != "",
+	}, nil
+}
+
+// isHTTPURL reports whether s is an absolute http(s) URL. Catalog endpoints
+// can be empty or unresolved "$ENV" placeholders (azure, gemini); those
+// must fail here instead of reaching a provider request.
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // requireAPIKey fails with [ErrNoAPIKey] when a provider that needs a
