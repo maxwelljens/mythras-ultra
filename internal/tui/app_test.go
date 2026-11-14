@@ -1191,3 +1191,214 @@ func TestChannelSwitchNotifiesDriver(t *testing.T) {
 		t.Errorf("after the second palette switch channels = %v, want [OOC IC OOC]", d.channels)
 	}
 }
+
+// TestContinuationAppendsToOpenEntry pins the streaming display rule: a
+// narrative batch flagged Continuation extends the entry already open on
+// the same channel — one entry, one blank line before it, the combined
+// markdown — instead of starting a new one.
+func TestContinuationAppendsToOpenEntry(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 30)
+	for _, ev := range []Event{
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "Earlier."},
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "The lamp gutters."},
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: " It flickers once.", Continuation: true},
+	} {
+		_, _ = a.Update(eventMsg{ev: ev})
+	}
+	if len(a.entries) != 2 {
+		t.Fatalf("entries = %d, want 2 (a continuation never opens one)", len(a.entries))
+	}
+	const combined = "The lamp gutters. It flickers once."
+	if got := a.entries[1].ev.Markdown; got != combined {
+		t.Errorf("entry markdown = %q, want the combined %q", got, combined)
+	}
+	lines := strings.Split(plain(view(a)), "\n")
+	first, second := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "Earlier.") {
+			first = i
+		}
+		if strings.Contains(line, "The lamp gutters.") {
+			second = i
+		}
+	}
+	if first < 0 || second < 0 {
+		t.Fatalf("both entries should render, view:\n%s", plain(view(a)))
+	}
+	if second-first != 2 {
+		t.Errorf("entries must stay separated by exactly one blank line, got %d lines between them:\n%s",
+			second-first-1, plain(view(a)))
+	}
+}
+
+// TestContinuationAfterMismatchStartsNewEntry pins the defensive side: a
+// continuation whose last entry cannot take it — another channel, another
+// kind, or the player's own line — starts a fresh entry instead of
+// splicing across a boundary.
+func TestContinuationAfterMismatchStartsNewEntry(t *testing.T) {
+	t.Run("channel", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 30)
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelIC, Markdown: "On the IC channel."}})
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelOOC,
+			Markdown: "Across the divide.", Continuation: true}})
+		if len(a.entries) != 2 {
+			t.Fatalf("entries = %d, want 2 (the channel changed)", len(a.entries))
+		}
+		if got := a.entries[1].ev.Markdown; got != "Across the divide." {
+			t.Errorf("second entry = %q, want the continuation on its own", got)
+		}
+	})
+
+	t.Run("kind", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 30)
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventSystem, Channel: ChannelIC, Markdown: "the clock advances"}})
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelIC,
+			Markdown: "Narrative after a system line.", Continuation: true}})
+		if len(a.entries) != 2 {
+			t.Fatalf("entries = %d, want 2 (the system line is not narrative)", len(a.entries))
+		}
+	})
+
+	t.Run("speaker", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 30)
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelIC,
+			Markdown: "the door is barred.", Player: true}})
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelIC,
+			Markdown: "GM words must not join it.", Continuation: true}})
+		if len(a.entries) != 2 {
+			t.Fatalf("entries = %d, want 2 (the player's line is a different speaker)", len(a.entries))
+		}
+	})
+}
+
+// TestReplayedDiceSkipsTheTheatre pins the resume display: a dice event
+// flagged Replay files its finished banner at once — no theatre, no
+// animation command, nothing re-performed — while a live roll still goes
+// on stage exactly as before.
+func TestReplayedDiceSkipsTheTheatre(t *testing.T) {
+	a, _ := newTestApp(t, Options{DiceAnimation: true}, 80, 24)
+	roll := rollEvent()
+
+	cmd := a.ingest(Event{Kind: EventDice, Channel: ChannelIC, Dice: &roll, Replay: true})
+	if cmd != nil {
+		t.Error("a replayed roll must not return an animation command")
+	}
+	if a.dice.Active() {
+		t.Error("a replayed roll must never take the stage")
+	}
+	if len(a.entries) != 1 || a.entries[0].ev.Dice == nil {
+		t.Fatalf("entries = %+v, want the finished banner filed at once", a.entries)
+	}
+	if !a.entries[0].ev.Replay {
+		t.Error("the filed banner should keep its Replay flag")
+	}
+	if !strings.Contains(plain(view(a)), "= 14") {
+		t.Errorf("the finished banner should show the total, view:\n%s", plain(view(a)))
+	}
+
+	cmd = a.ingest(Event{Kind: EventDice, Channel: ChannelIC, Dice: &roll})
+	if cmd == nil {
+		t.Error("a live roll should still start the theatre")
+	}
+	if !a.dice.Active() {
+		t.Error("a live roll should go on stage")
+	}
+}
+
+// TestContextUsageText pins the footer's readout format: tokens below a
+// thousand as-is and above as "42.3K", the percentage of the window
+// rounded and clamped at 100%, nothing before the first model call, and
+// tokens alone when the window is unknown.
+func TestContextUsageText(t *testing.T) {
+	tests := []struct {
+		name string
+		c    ContextUsage
+		want string
+	}{
+		{"no model call yet", ContextUsage{}, ""},
+		{"negative tokens read as no call", ContextUsage{Tokens: -5, Window: 1000}, ""},
+		{"plain int below a thousand", ContextUsage{Tokens: 999}, "999"},
+		{"thousands with an unknown window", ContextUsage{Tokens: 42340}, "42.3K"},
+		{"thousands against the window", ContextUsage{Tokens: 42340, Window: 128000}, "42.3K (33%)"},
+		{"rounds the percentage", ContextUsage{Tokens: 500, Window: 1000}, "500 (50%)"},
+		{"exactly the window", ContextUsage{Tokens: 1000, Window: 1000}, "1.0K (100%)"},
+		{"over the window clamps to 100%", ContextUsage{Tokens: 1500, Window: 1000}, "1.5K (100%)"},
+		{"over the window as a plain int", ContextUsage{Tokens: 999, Window: 500}, "999 (100%)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contextUsageText(tt.c); got != tt.want {
+				t.Errorf("contextUsageText(%+v) = %q, want %q", tt.c, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFooterShowsContextUsageRightAligned pins the footer layout: the
+// hints stay left, the readout sits flush to the right edge of the
+// terminal, the line never exceeds the window (the hints clip when the
+// window is too narrow for both), and no readout shows before the first
+// model call.
+func TestFooterShowsContextUsageRightAligned(t *testing.T) {
+	footerLine := func(a *App) string {
+		lines := strings.Split(view(a), "\n")
+		return lines[len(lines)-1]
+	}
+	refresh := func(a *App) {
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventSystem, Channel: ChannelIC, Markdown: "tick"}})
+	}
+
+	a, d := newTestApp(t, Options{}, 80, 24)
+	refresh(a)
+	if got := plain(footerLine(a)); strings.Contains(got, "%") || strings.Contains(got, "42.3K") {
+		t.Errorf("no context readout before the first model call, footer: %q", got)
+	}
+
+	d.md = Metadata{ContextUsage: ContextUsage{Tokens: 42340, Window: 128000}}
+	refresh(a)
+	got := plain(footerLine(a))
+	if !strings.HasPrefix(got, "enter send") {
+		t.Errorf("footer should keep its hints on the left, got %q", got)
+	}
+	if !strings.HasSuffix(got, "42.3K (33%)") {
+		t.Errorf("footer should end with the readout, got %q", got)
+	}
+	if w := lipgloss.Width(footerLine(a)); w != 80 {
+		t.Errorf("right-aligned footer width = %d, want exactly the window width 80", w)
+	}
+
+	// A narrow window clips the hints rather than pushing the readout
+	// off the edge.
+	_, _ = a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	got = plain(footerLine(a))
+	if !strings.HasSuffix(got, "42.3K (33%)") {
+		t.Errorf("the readout should keep the right edge on a narrow window, got %q", got)
+	}
+	if w := lipgloss.Width(footerLine(a)); w > 40 {
+		t.Errorf("footer wider than the window: %d > 40 (%q)", w, got)
+	}
+}
+
+// TestReplayedNarrativeLeavesTurnStateAlone pins the Replay guards: a
+// line replayed from the log files as history — no throbber transition,
+// no echo claimed — so resuming can never disturb a turn that has not
+// started or steal the recognition of a message the player just sent.
+func TestReplayedNarrativeLeavesTurnStateAlone(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 24)
+	a.recordEcho("I open the door.")
+
+	cmd := a.ingest(Event{Kind: EventNarrative, Channel: ChannelIC,
+		Markdown: "I open the door.", Player: true, Replay: true})
+	if cmd != nil {
+		t.Error("a replayed line must not return a throbber command")
+	}
+	if a.throb.state != throbIdle {
+		t.Errorf("throbber state = %v, want idle for a replayed line", a.throb.state)
+	}
+	if len(a.entries) != 1 || !a.entries[0].player {
+		t.Fatalf("entries = %+v, want the replayed player line filed as the player", a.entries)
+	}
+	if len(a.echoes) != 1 {
+		t.Errorf("echo list = %v, want the outstanding echo untouched by replay", a.echoes)
+	}
+}

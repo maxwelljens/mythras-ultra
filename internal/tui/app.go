@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -757,10 +759,12 @@ func (a *App) retag() {
 // only (EventError clears it as well as being filed). Dice events go to
 // the theatre instead of the transcript: the roll animates in place while
 // the transcript keeps accepting events after it, and the banner is filed
-// when the animation finishes (at once when animation is off). Everything
-// else — including the harness's echo of the player's own message,
-// recognised here — appends immediately. It returns the command that
-// drives the theatre or the throbber, if any.
+// when the animation finishes (at once when animation is off) — a roll
+// replayed from the log is history, so it files as its finished banner
+// without being performed again. Everything else — including the harness's
+// echo of the player's own message, recognised here — appends immediately,
+// except a continuation batch, which extends the entry already open.
+// It returns the command that drives the theatre or the throbber, if any.
 func (a *App) ingest(ev Event) tea.Cmd {
 	switch ev.Kind {
 	case EventThinking:
@@ -773,12 +777,21 @@ func (a *App) ingest(ev Event) tea.Cmd {
 		cmd = a.throb.setState(throbIdle) // a failed turn leaves no throbber behind
 	}
 	if ev.Kind == EventDice && ev.Dice != nil {
+		if ev.Replay {
+			a.appendEvent(ev, false) // finished banner: no theatre, no re-performance
+			return cmd
+		}
 		return tea.Batch(cmd, a.startRoll(ev))
 	}
 	// Authorship: an explicit Player flag (echo or replayed line) wins;
-	// otherwise fall back to matching recently sent text.
-	matched := ev.Kind == EventNarrative && a.consumeEcho(ev.Markdown)
-	a.appendEvent(ev, ev.Player || matched)
+	// otherwise fall back to matching recently sent text. A continuation
+	// belongs to the entry it extends and a replayed line is history —
+	// neither may claim an echo.
+	matched := ev.Kind == EventNarrative && !ev.Continuation && !ev.Replay &&
+		a.consumeEcho(ev.Markdown)
+	if !ev.Continuation || !a.extendEntry(ev) {
+		a.appendEvent(ev, ev.Player || matched)
+	}
 	switch {
 	case ev.Kind == EventNarrative && a.throb.state == throbThinking:
 		// The model's first words after EventThinking: it is writing now.
@@ -789,6 +802,28 @@ func (a *App) ingest(ev Event) tea.Cmd {
 		cmd = tea.Batch(cmd, a.throb.setState(throbThinking))
 	}
 	return cmd
+}
+
+// extendEntry appends a continuation batch to the last transcript entry
+// when that entry can take it — a narrative entry on the same channel and
+// the same side (player line or GM narration) — and re-renders just that
+// entry. Tags are untouched: runs group by channel and speaker, so an
+// extended entry never re-tags and the rest of the transcript is not
+// re-rendered. It reports false when the batch must start a fresh entry
+// instead (nothing open, or the last entry is another kind/channel/side).
+func (a *App) extendEntry(ev Event) bool {
+	if len(a.entries) == 0 {
+		return false
+	}
+	last := &a.entries[len(a.entries)-1]
+	if last.ev.Kind != EventNarrative || last.ev.Channel != ev.Channel || last.player != ev.Player {
+		return false
+	}
+	last.ev.Markdown += ev.Markdown
+	last.text = a.renderEvent(last.ev, a.chatW, last.player, last.tagged)
+	last.width = a.chatW
+	a.syncViewport()
+	return true
 }
 
 // startRoll puts ev on stage. One roll animates at a time: a roll arriving
@@ -1262,15 +1297,52 @@ func (a *App) channelSwitch() string {
 	return ic.Render("IC") + " " + ooc.Render("[OOC]")
 }
 
-// renderFooter builds the terse keybinding hints. The full key list lives
-// in the help overlay (and the sheet swaps in its own hint while up), so
-// the footer stays one short line.
+// renderFooter builds the terse keybinding hints on the left and the
+// context readout on the right, muted and flush to the terminal edge. The
+// full key list lives in the help overlay (and the sheet swaps in its own
+// hint while up), so the footer stays one short line that always fits: the
+// readout wins the right edge and the hints share whatever is left.
 func (a *App) renderFooter() string {
 	hints := "enter send · ctrl+c quit · ctrl+p commands"
 	if a.sheetOpen {
 		hints = "esc close · pgup/pgdn scroll"
 	}
-	return fit(a.theme.Styles.Footer, hints, a.width)
+	usage := contextUsageText(a.meta.ContextUsage)
+	if usage == "" || a.width < 1 {
+		return fit(a.theme.Styles.Footer, hints, a.width)
+	}
+	right := a.theme.Styles.Muted.Render(usage)
+	leftW := a.width - lipgloss.Width(usage)
+	if leftW < 1 {
+		return fit(a.theme.Styles.Muted, usage, a.width) // window narrower than the readout
+	}
+	left := fit(a.theme.Styles.Footer, hints, leftW)
+	// fit clips to leftW, so the padding is never negative (max keeps a
+	// pathological clip from panicking the view).
+	return left + strings.Repeat(" ", max(0, leftW-lipgloss.Width(left))) + right
+}
+
+// contextUsageText formats the footer's context readout: tokens as "999"
+// below a thousand and "42.3K" at or above, followed by " (18%)" — the
+// share of the window in use — when the window is known, and clamped to
+// 100% when the last call already reports more tokens than the window.
+// No call yet (Tokens 0) reads as "" so the footer shows hints alone.
+func contextUsageText(c ContextUsage) string {
+	if c.Tokens <= 0 {
+		return ""
+	}
+	tokens := strconv.Itoa(c.Tokens)
+	if c.Tokens >= 1000 {
+		tokens = fmt.Sprintf("%.1fK", float64(c.Tokens)/1000)
+	}
+	if c.Window <= 0 {
+		return tokens
+	}
+	pct := int(math.Round(100 * float64(c.Tokens) / float64(c.Window)))
+	if pct > 100 {
+		pct = 100
+	}
+	return tokens + " (" + strconv.Itoa(pct) + "%)"
 }
 
 // renderPanel builds the right-hand metadata panel from the cached snapshot;

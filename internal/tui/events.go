@@ -86,13 +86,34 @@ type NameValue struct {
 	Value string
 }
 
+// SheetGroup is one titled section of sheet rows — a skill category
+// ("Standard Skills", "Professional Skills") as the engine reports it.
+type SheetGroup struct {
+	// Name is the section title the overlay shows.
+	Name string
+	// Rows are the section's rows, in the shared rated order.
+	Rows []NameValue
+}
+
+// InventoryItem is one carried item as the sheet's inventory table shows
+// it: the name, how many are carried, whether it is worn or wielded and
+// in which slot (empty for worn items).
+type InventoryItem struct {
+	Name     string
+	Qty      int
+	Equipped bool
+	Slot     string
+}
+
 // Sheet is the full character sheet behind the sheet overlay: display-ready,
 // consumer-side data assembled by the session from engine state (the TUI
 // never derives numbers). Characteristics keep the fixed STR CON SIZ DEX INT
 // POW CHA order; Derived lists HP, Damage Modifier, Power Points, Luck and
-// Experience Bonus as the engine reports them; Skills, Styles and Passions
-// are sorted by value descending, then name. The zero value means "no
-// character yet" and renders the overlay's empty state.
+// Experience Bonus as the engine reports them; Styles and Passions are
+// sorted by value descending, then name. Skills arrive either sectioned by
+// category in SkillGroups, or flat in Skills (sorted the same way) when the
+// source knows no categories. The zero value means "no character yet" and
+// renders the overlay's empty state.
 type Sheet struct {
 	// Name, Culture, Career, Age and Concept identify the character.
 	// Age is "" when the character records no age.
@@ -102,11 +123,18 @@ type Sheet struct {
 	// Derived are the pooled derived readouts (HP, Damage Modifier,
 	// Power Points, Luck, Experience Bonus).
 	Derived []NameValue
-	// Skills lists assigned skills; Styles lists combat styles;
-	// Passions lists passions.
-	Skills, Styles, Passions []NameValue
-	// Inventory is the carried-item list (quantity/equip markers included).
-	Inventory []string
+	// HPCurrent and HPMax are the pooled hit points behind the Derived
+	// HP row, for the overlay's bar (both zero when unknown).
+	HPCurrent, HPMax int
+	// Skills lists assigned skills in one flat section; SkillGroups
+	// sections the same skills by category (whichever is set renders —
+	// groups win when both are).
+	Skills      []NameValue
+	SkillGroups []SheetGroup
+	// Styles lists combat styles; Passions lists passions.
+	Styles, Passions []NameValue
+	// Inventory is the carried-item table (quantity and equip markers).
+	Inventory []InventoryItem
 	// Locations are the hit locations with live HP.
 	Locations []LocationHP
 	// Conditions lists active conditions (poisoned, prone, …).
@@ -143,6 +171,19 @@ type Vitals struct {
 	Conditions []string
 }
 
+// ContextUsage is the footer's context readout: the input tokens the most
+// recent model call reported (Tokens — the context size the model just
+// saw) against the model's window (Window, 0 when unknown). It is advisory
+// display data: compaction still counts messages, never tokens.
+type ContextUsage struct {
+	// Tokens is the last reported input-token count; 0 before the first
+	// model call, which renders nothing.
+	Tokens int
+	// Window is the model's context window in tokens (0 = unknown, so
+	// the footer shows tokens without a percentage).
+	Window int
+}
+
 // Metadata is a coarse, display-ready snapshot of the session for the
 // right-hand metadata panel. It is pure presentation data — no engine types,
 // no behaviour — so the harness/session layer can assemble it from state
@@ -165,6 +206,8 @@ type Metadata struct {
 	Flags []string
 	// SessionName and InGameDate label the session and the calendar.
 	SessionName, InGameDate string
+	// ContextUsage feeds the footer's context readout (see the type).
+	ContextUsage ContextUsage
 }
 
 // Event is one item on the transcript, delivered by the harness through
@@ -184,6 +227,18 @@ type Event struct {
 	// authorship survives a save/resume where no send history exists to
 	// match against.
 	Player bool
+	// Replay marks an event rebuilt from log.jsonl on resume. The TUI
+	// renders it as history: a replayed roll files as its finished
+	// banner at once instead of performing the dice-theatre animation
+	// again, and replayed lines never disturb the throbber or the echo
+	// matching (both only act during a live turn).
+	Replay bool
+	// Continuation marks a narrative batch that EXTENDS the transcript
+	// entry already open rather than starting one: streamed text of the
+	// same paragraph arrives in several batches, and the TUI appends
+	// them to the last narrative entry on the same channel (starting a
+	// fresh entry instead when that entry cannot take it).
+	Continuation bool
 }
 
 // Driver is the contract between the TUI and the game harness. The interface

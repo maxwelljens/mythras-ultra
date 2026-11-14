@@ -30,13 +30,18 @@ func testSheet() Sheet {
 			{Name: "Luck", Value: "15"},
 			{Name: "Experience Bonus", Value: "2"},
 		},
+		HPCurrent: 34,
+		HPMax:     40,
 		Skills: []NameValue{
 			{Name: "Athletics", Value: "80%"}, {Name: "Dodge", Value: "60%"},
 			{Name: "Stealth", Value: "40%"}, {Name: "Track", Value: "20%"},
 		},
-		Styles:    []NameValue{{Name: "Broadsword", Value: "65%"}},
-		Passions:  []NameValue{{Name: "Loyalty: the party", Value: "60%"}},
-		Inventory: []string{"Rope ×3", "Torch (equipped: hand)"},
+		Styles:   []NameValue{{Name: "Broadsword", Value: "65%"}},
+		Passions: []NameValue{{Name: "Loyalty: the party", Value: "60%"}},
+		Inventory: []InventoryItem{
+			{Name: "Rope", Qty: 3},
+			{Name: "Torch", Qty: 1, Equipped: true, Slot: "hand"},
+		},
 		Locations: []LocationHP{
 			{Name: "Head", Current: 7, Max: 7},
 			{Name: "Right Arm", Current: 3, Max: 5, Severity: "wound"},
@@ -56,7 +61,7 @@ func openTestSheet(t *testing.T, a *App) {
 }
 
 // TestSheetOverlayRenders pins the overlay's rendering: the palette opens
-// it, the header and every section of a prepared session snapshot show,
+// it, the banner and every section of a prepared session snapshot show,
 // the window is filled exactly, and the footer switches to its own hint.
 func TestSheetOverlayRenders(t *testing.T) {
 	a, d := newTestApp(t, Options{}, 80, 45) // tall enough for the whole sheet
@@ -65,12 +70,13 @@ func TestSheetOverlayRenders(t *testing.T) {
 
 	got := plain(view(a))
 	for _, want := range []string{
-		"Character sheet — Wren Ashdown",
-		"IDENTITY", "Civilised · Hunter · 27", "owes a debt",
-		"CHARACTERISTICS", "DERIVED", "SKILLS", "COMBAT STYLES", "PASSIONS",
-		"INVENTORY", "HIT LOCATIONS", "CONDITIONS",
-		"STR", "CHA", "34/40", "Damage Modifier", "Dodge",
-		"Broadsword", "Rope ×3", "Right Arm 3/5", "Poisoned (Right Arm)",
+		"Character sheet",
+		"Wren Ashdown", "Civilised · Hunter · 27", "owes a debt",
+		"Characteristics", "Derived", "Wounds", "Skills",
+		"⚔ Styles", "✺ Passions", "Inventory", "Conditions",
+		"STR", "CHA", "34/40", "1d6", "Dodge",
+		"Broadsword", "Rope", "✔ hand", "Right Arm", "3/5", "▲ wounded",
+		"Poisoned (Right Arm)",
 		"esc close · pgup/pgdn scroll",
 	} {
 		if !strings.Contains(got, want) {
@@ -112,7 +118,7 @@ func TestSheetEmptyState(t *testing.T) {
 	if !strings.Contains(got, sheetEmptyState) {
 		t.Errorf("empty sheet should show %q, view:\n%s", sheetEmptyState, got)
 	}
-	if strings.Contains(got, "CHARACTERISTICS") {
+	if strings.Contains(got, "Characteristics") {
 		t.Errorf("empty sheet must not render sections, view:\n%s", got)
 	}
 }
@@ -159,8 +165,8 @@ func TestSheetScrollRouting(t *testing.T) {
 		t.Fatalf("the sheet starts at its top, got scroll %d", a.sheetScroll)
 	}
 	first := plain(view(a))
-	if !strings.Contains(first, "CHARACTERISTICS") {
-		t.Fatalf("top of sheet should show CHARACTERISTICS, view:\n%s", first)
+	if !strings.Contains(first, "Characteristics") {
+		t.Fatalf("top of sheet should show Characteristics, view:\n%s", first)
 	}
 
 	press(t, a, tea.KeyPressMsg{Code: tea.KeyPgDown})
@@ -168,7 +174,7 @@ func TestSheetScrollRouting(t *testing.T) {
 		t.Fatal("pgdown should scroll the sheet")
 	}
 	scrolled := plain(view(a))
-	if strings.Contains(scrolled, "CHARACTERISTICS") {
+	if strings.Contains(scrolled, "Characteristics") {
 		t.Errorf("scrolled sheet should have left the top, view:\n%s", scrolled)
 	}
 	press(t, a, tea.KeyPressMsg{Code: tea.KeyPgUp})
@@ -196,7 +202,7 @@ func TestSheetScrollRouting(t *testing.T) {
 	if a.sheetOpen {
 		t.Error("esc should close the sheet")
 	}
-	if strings.Contains(plain(view(a)), "Character sheet —") {
+	if strings.Contains(plain(view(a)), "Character sheet") {
 		t.Error("closed sheet must not render")
 	}
 	if a.follow {
@@ -204,6 +210,61 @@ func TestSheetScrollRouting(t *testing.T) {
 	}
 	if hints := plain(view(a)); !strings.Contains(hints, "ctrl+p commands") {
 		t.Errorf("the normal footer should return after closing, view:\n%s", hints)
+	}
+}
+
+// TestSheetLinesFitEveryWidth pins the width contract on every line the
+// sheet can render — the overlay's own test only sees the visible slice —
+// from a narrow window to a wide one, with a long item name forcing the
+// inventory table onto its plain-row fallback.
+func TestSheetLinesFitEveryWidth(t *testing.T) {
+	th, err := Get("mythras")
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := testSheet()
+	long.Inventory = append(long.Inventory, InventoryItem{
+		Name: "the hunter's famously long emergency rations", Qty: 1,
+	})
+	for _, w := range []int{40, 60, 80, 120} {
+		for name, s := range map[string]Sheet{"filled": long, "empty": {}} {
+			for _, line := range sheetBody(th, s, w) {
+				if got := lipgloss.Width(line); got > w {
+					t.Errorf("%s sheet at width %d: line is %d cols: %q",
+						name, w, got, plain(line))
+				}
+			}
+		}
+	}
+}
+
+// TestSheetSkillGroupsSections pins the category path: a snapshot that
+// carries skill groups renders one section per group under its own header,
+// while a flat snapshot keeps the single Skills section.
+func TestSheetSkillGroupsSections(t *testing.T) {
+	th, err := Get("mythras")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grouped := testSheet()
+	grouped.Skills = nil
+	grouped.SkillGroups = []SheetGroup{
+		{Name: "Standard Skills", Rows: []NameValue{
+			{Name: "Athletics", Value: "80%"}, {Name: "Stealth", Value: "40%"},
+		}},
+		{Name: "Professional Skills", Rows: []NameValue{
+			{Name: "Track", Value: "20%"},
+		}},
+	}
+	got := plain(strings.Join(sheetBody(th, grouped, 80), "\n"))
+	for _, want := range []string{"Standard Skills", "Professional Skills", "Athletics 80%", "Track 20%"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("grouped sheet should contain %q, sheet:\n%s", want, got)
+		}
+	}
+	flat := plain(strings.Join(sheetBody(th, testSheet(), 80), "\n"))
+	if !strings.Contains(flat, "── Skills ──") || strings.Contains(flat, "Standard Skills") {
+		t.Errorf("a flat snapshot should render one Skills section, sheet:\n%s", flat)
 	}
 }
 
@@ -238,5 +299,30 @@ func TestCtrlMTogglesPanelUnderSheet(t *testing.T) {
 	press(t, a, ctrl('m'))
 	if !a.panelOpen || !strings.Contains(plain(view(a)), "METADATA") {
 		t.Errorf("panel should open normally after the sheet closes (open=%t)", a.panelOpen)
+	}
+}
+
+// TestSheetCharacteristicsChipWrap pins the chip row: the seven
+// characteristics share one row on a wide sheet and wrap to two on a
+// narrow one, every chip intact (the brackets are the row markers).
+func TestSheetCharacteristicsChipWrap(t *testing.T) {
+	th, err := Get("mythras")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chipRows := func(w int) int {
+		rows := 0
+		for _, line := range sheetBody(th, testSheet(), w) {
+			if strings.Contains(plain(line), "]") {
+				rows++
+			}
+		}
+		return rows
+	}
+	if got := chipRows(80); got != 1 {
+		t.Errorf("characteristics at width 80 span %d rows, want one", got)
+	}
+	if got := chipRows(50); got != 2 {
+		t.Errorf("characteristics at width 50 span %d rows, want two", got)
 	}
 }
