@@ -520,6 +520,129 @@ func TestReadLogTolerance(t *testing.T) {
 	}
 }
 
+// TestSaveChatLoadChat covers the conversation snapshot: byte-exact
+// round-trip, overwrite, unsafe IDs, and LoadChat's ladder — absent and
+// corrupt files both report ErrNotFound (a resume degrades to an empty
+// history), while a real I/O problem stays a real error.
+func TestSaveChatLoadChat(t *testing.T) {
+	store, _ := testStore(t)
+
+	// Nothing written yet: ErrNotFound, not an empty success.
+	if _, err := store.LoadChat("s-chat"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadChat on a fresh session error = %v, want ErrNotFound", err)
+	}
+	for _, bad := range []string{"", ".", "..", "../evil", "a/b"} {
+		if _, err := store.LoadChat(bad); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("LoadChat(%q) error = %v, want ErrInvalidID", bad, err)
+		}
+		if err := store.SaveChat(bad, nil); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("SaveChat(%q) error = %v, want ErrInvalidID", bad, err)
+		}
+	}
+
+	// Round-trip: the store returns exactly the bytes it was given.
+	data := []byte(`[{"role":"user","content":"I wake the relic."}]`)
+	if err := store.SaveChat("s-chat", data); err != nil {
+		t.Fatalf("SaveChat: %v", err)
+	}
+	got, err := store.LoadChat("s-chat")
+	if err != nil {
+		t.Fatalf("LoadChat: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("LoadChat = %s, want %s", got, data)
+	}
+	// Saving without a prior state.Save still lands (like Record).
+	if err := store.SaveChat("s-newborn", []byte(`[]`)); err != nil {
+		t.Fatalf("SaveChat without save: %v", err)
+	}
+
+	// Corrupt bytes (the truncated-file signature) read as ErrNotFound —
+	// tolerant recovery, never a decode crash at resume.
+	chatPath := filepath.Join(store.root, "sessions", "s-chat", "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"role": "use`), 0o644); err != nil {
+		t.Fatalf("corrupt chat.json: %v", err)
+	}
+	if _, err := store.LoadChat("s-chat"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadChat on corrupt file error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSaveChatAtomicFailure proves the atomic-write promise for chat.json:
+// a failure between flush and rename leaves the previous bytes untouched
+// with no temp litter, and a retry then succeeds.
+func TestSaveChatAtomicFailure(t *testing.T) {
+	store, _ := testStore(t)
+	original := []byte(`["turn one"]`)
+	if err := store.SaveChat("s-chat-atomic", original); err != nil {
+		t.Fatalf("first SaveChat: %v", err)
+	}
+	chatPath := filepath.Join(store.root, "sessions", "s-chat-atomic", "chat.json")
+
+	store.beforeRename = func() error { return errors.New("injected write fault") }
+	if err := store.SaveChat("s-chat-atomic", []byte(`["turn two"]`)); err == nil {
+		t.Fatal("SaveChat = nil with fault injected, want error")
+	}
+	store.beforeRename = nil
+
+	after, err := os.ReadFile(chatPath)
+	if err != nil {
+		t.Fatalf("read chat.json after fault: %v", err)
+	}
+	if !bytes.Equal(after, original) {
+		t.Errorf("failed write clobbered chat.json: %s", after)
+	}
+	for _, name := range dirNames(t, filepath.Dir(chatPath)) {
+		if strings.Contains(name, ".tmp") {
+			t.Errorf("temp litter left behind: %s", name)
+		}
+	}
+	if err := store.SaveChat("s-chat-atomic", []byte(`["turn two"]`)); err != nil {
+		t.Fatalf("retry SaveChat: %v", err)
+	}
+	got, err := store.LoadChat("s-chat-atomic")
+	if err != nil {
+		t.Fatalf("LoadChat after retry: %v", err)
+	}
+	if string(got) != `["turn two"]` {
+		t.Errorf("LoadChat = %s, want the retried bytes", got)
+	}
+}
+
+// TestRecordReadLogChatEntry pins the chat entry round-trip: fields come
+// back exactly, in order, beside move entries that read with Chat nil
+// (old lines unaffected by the additive field).
+func TestRecordReadLogChatEntry(t *testing.T) {
+	store, _ := testStore(t)
+	if err := store.Record("s-chatlog", LogEntry{
+		Kind:   "roll_dice",
+		Move:   json.RawMessage(`{"expr":"1d6"}`),
+		Result: json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("Record move: %v", err)
+	}
+	line := &ChatLine{Channel: "OOC", Player: true, Kind: "narrative", Text: "we rest until dusk\n"}
+	if err := store.Record("s-chatlog", LogEntry{Kind: "chat", Chat: line}); err != nil {
+		t.Fatalf("Record chat: %v", err)
+	}
+	entries, err := store.ReadLog("s-chatlog")
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ReadLog = %d entries, want 2", len(entries))
+	}
+	if entries[0].Chat != nil {
+		t.Errorf("move entry carries a chat line: %+v", entries[0].Chat)
+	}
+	if !reflect.DeepEqual(entries[1].Chat, line) {
+		t.Errorf("chat entry = %+v, want %+v", entries[1].Chat, line)
+	}
+	if entries[1].Kind != "chat" {
+		t.Errorf("kind = %q, want chat", entries[1].Kind)
+	}
+}
+
 // TestDefaultClock checks the constructor fallback (production uses
 // time.Now when no clock is injected).
 func TestDefaultClock(t *testing.T) {

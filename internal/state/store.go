@@ -1,14 +1,14 @@
 // Package state persists play sessions: the Store interface, an atomic JSON
-// implementation under sessions/<id>/, and the append-only move log
-// (ARCHITECTURE.md §5).
+// implementation under sessions/<id>/, the append-only move log and the
+// conversation snapshot in chat.json (ARCHITECTURE.md §5).
 //
 // This layer owns wall time — its clock is injectable for tests — and it is
 // the trust boundary for files on disk: Load validates session IDs (no path
 // traversal), refuses unknown schema versions instead of reinterpreting
 // them, and runs resolve.State.Normalize so pointer identity inside a
 // loaded state is sound before anything touches it. The engine itself never
-// reads a clock; everything needed to resume a game lives in state.json —
-// no hidden state.
+// reads a clock; everything needed to resume a game lives in state.json
+// (game facts) and chat.json (the conversation) — no hidden state.
 package state
 
 import (
@@ -87,4 +87,13 @@ type Store interface {
 	// empty result, not an error; a truncated final line (crash mid-write)
 	// is skipped rather than failing the read.
 	ReadLog(id string) ([]LogEntry, error)
+	// SaveChat writes the session's conversation-history bytes to
+	// chat.json atomically (temp file + fsync + rename, like state.json).
+	// The bytes are opaque here — the caller marshals them.
+	SaveChat(id string, data []byte) error
+	// LoadChat reads the bytes SaveChat wrote. ErrNotFound when the
+	// session has no chat.json, and also when its contents are corrupt
+	// (a truncated or hand-mangled file degrades to "no saved
+	// conversation" instead of failing the resume).
+	LoadChat(id string) ([]byte, error)
 }

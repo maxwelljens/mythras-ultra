@@ -18,11 +18,13 @@ import (
 const transcriptKeySkills = 5
 
 // RenderTranscript renders a session's play log as deterministic Markdown:
-// a header of session identity, one readable line per log entry (an accepted
-// move as "**kind** — summary" with its Facts, dice rolls and rule citations
-// underneath; a refused move as "**kind** — refused: ..."), then the stored
-// recaps and a compact final character summary (ARCHITECTURE.md §5,
-// transcript.md).
+// a header of session identity, the play itself in recorded order — chat
+// lines as the play text (the player's lines prefixed "**You:** ", the
+// GM's narration and error lines verbatim) interleaved with one readable
+// line per move entry (an accepted move as "**kind** — summary" with its
+// Facts, dice rolls and rule citations underneath; a refused move as
+// "**kind** — refused: ...") — then the stored recaps and a compact final
+// character summary (ARCHITECTURE.md §5, transcript.md).
 //
 // The output is a pure function of s and entries: entries keep the order
 // they were given (the order [Store.ReadLog] replayed them, which already
@@ -91,11 +93,15 @@ func WriteTranscript(w io.Writer, s *resolve.State, entries []LogEntry) error {
 	return nil
 }
 
-// renderEntry renders one log entry as its markdown lines: the "kind —
-// summary" head, then indented Facts and Audit rolls/citations. Lines that
-// would repeat verbatim within one entry are emitted once (several moves
-// record the same roll as both a Fact and an Audit roll).
+// renderEntry renders one log entry as its markdown lines: a chat line as
+// its play text, otherwise the "kind — summary" head, then indented Facts
+// and Audit rolls/citations. Lines that would repeat verbatim within one
+// entry are emitted once (several moves record the same roll as both a
+// Fact and an Audit roll).
 func renderEntry(e LogEntry) ([]string, error) {
+	if e.Chat != nil {
+		return renderChat(e.Chat), nil
+	}
 	kind := e.Kind
 	if kind == "" {
 		kind = "move"
@@ -134,6 +140,22 @@ func renderEntry(e LogEntry) ([]string, error) {
 		}
 	}
 	return lines, nil
+}
+
+// renderChat renders one chat entry as its play line: the player's line
+// prefixed "**You:** ", the GM's narration (and recorded error text)
+// verbatim, in log order — so the play reads between the move annotations.
+// Trailing line breaks from stream flushes are trimmed (the entry loop
+// adds exactly one), keeping renders byte-identical line for line.
+func renderChat(c *ChatLine) []string {
+	text := strings.TrimRight(c.Text, "\r\n")
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if c.Player {
+		return []string{"**You:** " + text}
+	}
+	return []string{text}
 }
 
 // renderCharacters writes the compact final character summary to b: one

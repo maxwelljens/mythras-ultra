@@ -133,6 +133,70 @@ func TestRenderTranscript(t *testing.T) {
 	}
 }
 
+// TestRenderTranscriptChatInterleaved pins the play rendering: chat lines
+// and move annotations form one ordered stream — the player's line
+// prefixed "**You:** ", the GM's narration and recorded error text
+// verbatim — and two renders of the same log stay byte-identical.
+func TestRenderTranscriptChatInterleaved(t *testing.T) {
+	st := resolve.NewState("The Ash Road", 42)
+	st.ID = "s-play"
+	result, err := json.Marshal(resolve.Result{Summary: "1d6 → 4"})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	entries := []LogEntry{
+		{Kind: "chat", Chat: &ChatLine{Channel: "IC", Player: true, Kind: "narrative", Text: "I knock twice."}},
+		{Kind: "chat", Chat: &ChatLine{Channel: "IC", Kind: "narrative", Text: "The door swings open.\n"}},
+		{Kind: "roll_dice", Move: json.RawMessage(`{"expr":"1d6"}`), Result: result},
+		{Kind: "chat", Chat: &ChatLine{Channel: "OOC", Kind: "error", Text: "turn failed: the model is unavailable"}},
+	}
+
+	out, err := RenderTranscript(st, entries)
+	if err != nil {
+		t.Fatalf("RenderTranscript: %v", err)
+	}
+	for _, want := range []string{
+		"**You:** I knock twice.\n",
+		"The door swings open.\n",
+		"- **roll_dice** — 1d6 → 4\n",
+		"turn failed: the model is unavailable\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("transcript missing %q:\n%s", want, out)
+		}
+	}
+	// Interleaving: chat and move lines share the recorded order.
+	wantOrder := []string{"**You:** I knock twice.", "The door swings open.",
+		"- **roll_dice**", "turn failed: the model is unavailable"}
+	prev := -1
+	for _, needle := range wantOrder {
+		i := strings.Index(out, needle)
+		if i < 0 {
+			t.Fatalf("transcript missing %q:\n%s", needle, out)
+		}
+		if i <= prev {
+			t.Errorf("%q appears out of recorded order:\n%s", needle, out)
+		}
+		prev = i
+	}
+	// The stream-flush newline is trimmed, so no blank line opens before
+	// the move annotation, and chat never renders as a move line.
+	if strings.Contains(out, "open.\n\n- **roll_dice**") {
+		t.Errorf("chat line left a stray blank line:\n%s", out)
+	}
+	if strings.Contains(out, "- **chat**") {
+		t.Errorf("chat entry rendered as a move:\n%s", out)
+	}
+
+	again, err := RenderTranscript(st, entries)
+	if err != nil {
+		t.Fatalf("second RenderTranscript: %v", err)
+	}
+	if out != again {
+		t.Errorf("renders differ:\nfirst:\n%s\nsecond:\n%s", out, again)
+	}
+}
+
 func TestRenderTranscriptEmptyLog(t *testing.T) {
 	st := resolve.NewState("Fresh Start", 7)
 	out, err := RenderTranscript(st, nil)
