@@ -67,6 +67,9 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 				"no language model configured — set [llm] provider and model in %s, or pass --provider and --model",
 				config.ResolveConfigPath(configPath))
 		}
+		if err := requireAPIKeyEnv(cfg.LLM); err != nil {
+			return err
+		}
 		if !isTerminal(cmd) {
 			return errors.New(
 				"an interactive terminal is required to play — use --no-tui (create with `myul new --no-tui`, resume the latest with `myul --no-tui`)")
@@ -207,8 +210,8 @@ func newLLMClient(cfg config.LLMConfig) (llm.Client, error) {
 		return nil, nil
 	}
 	var key string
-	if cfg.APIKeyEnv != "" {
-		key = os.Getenv(cfg.APIKeyEnv)
+	if env := effectiveAPIKeyEnv(cfg); env != "" {
+		key = os.Getenv(env)
 	}
 	client, err := llm.NewFantasyClient(llm.Config{
 		Provider: cfg.Provider,
@@ -220,6 +223,37 @@ func newLLMClient(cfg config.LLMConfig) (llm.Client, error) {
 		return nil, fmt.Errorf("llm client: %w", err)
 	}
 	return client, nil
+}
+
+// effectiveAPIKeyEnv returns the environment variable holding the
+// provider's API key: the config's llm.api_key_env when set, otherwise the
+// embedded catalog's default for the provider — so `provider = "deepseek"`
+// alone works with $DEEPSEEK_API_KEY. Precedence: explicit config >
+// catalog defaults. Only the variable name resolves here; its value comes
+// from the environment (os.Getenv), never from the config file.
+func effectiveAPIKeyEnv(cfg config.LLMConfig) string {
+	if cfg.APIKeyEnv != "" {
+		return cfg.APIKeyEnv
+	}
+	info, err := llm.ResolveProvider(cfg.Provider)
+	if err != nil {
+		return ""
+	}
+	return info.APIKeyEnv
+}
+
+// requireAPIKeyEnv fails play — before any session exists — when the
+// provider's effective api-key variable holds no value, naming the
+// variable and the config file. Providers that declare no key (and native
+// "openaicompat" setups) need none.
+func requireAPIKeyEnv(cfg config.LLMConfig) error {
+	env := effectiveAPIKeyEnv(cfg)
+	if env == "" || os.Getenv(env) != "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"no API key — export $%s or set [llm] api_key_env in %s",
+		env, config.ResolveConfigPath(configPath))
 }
 
 // modelLabel renders the model for the TUI header and /meta: the provider

@@ -4,6 +4,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,11 +24,12 @@ func createSession(t *testing.T, name string) string {
 }
 
 // parseCreatedID pulls the id out of flushNoTUI's
-// `created session <id> (<name>)` line.
+// `created session <id> (<name>)` line — anywhere in the output, since
+// the deferred-LLM path prints its config guidance first.
 func parseCreatedID(t *testing.T, out string) string {
 	t.Helper()
-	rest, ok := strings.CutPrefix(out, "created session ")
-	if !ok {
+	_, rest, found := strings.Cut(out, "created session ")
+	if !found {
 		t.Fatalf("new --no-tui output = %q, want a created-session line", out)
 	}
 	id, _, _ := strings.Cut(rest, " (")
@@ -146,6 +149,108 @@ func TestNewNoTUNeedsNoCredentials(t *testing.T) {
 	if id := parseCreatedID(t, out); id == "" {
 		t.Errorf("no session id in %q", out)
 	}
+}
+
+// TestNewSkipLLM: the non-interactive custom path — `myul new --skip-llm`
+// writes the template config exactly once, creates the session headless
+// (the --no-tui seam: in a pipe a TUI attempt would fail on the missing
+// terminal, so a clean exit proves it was never launched) and prints the
+// config path, the keys to set and the resume guidance.
+func TestNewSkipLLM(t *testing.T) {
+	dataDir, configDir := isolatedDirs(t)
+	configFile := filepath.Join(configDir, "config.toml")
+
+	out, err := execute(t, "new", "--name", "Deferred", "--seed", "7", "--skip-llm")
+	if err != nil {
+		t.Fatalf("new --skip-llm error = %v (output %q)", err, out)
+	}
+	if id := parseCreatedID(t, out); id == "" {
+		t.Errorf("no session id in %q", out)
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("template config not written: %v", err)
+	}
+	if !strings.Contains(out, configFile) {
+		t.Errorf("output missing the config path %q: %q", configFile, out)
+	}
+	if !strings.Contains(out, "[llm] provider, model, api_key_env, base_url") {
+		t.Errorf("output missing the keys-to-set guidance: %q", out)
+	}
+	if !strings.Contains(out, "myul resume") {
+		t.Errorf("output missing the resume guidance: %q", out)
+	}
+
+	// A second run must leave the (now user-owned) file untouched.
+	marker := string(raw) + "\n# customised by the user\n"
+	if err := os.WriteFile(configFile, []byte(marker), 0o644); err != nil {
+		t.Fatalf("mark config: %v", err)
+	}
+	out2, err := execute(t, "new", "--name", "Deferred Again", "--seed", "7", "--skip-llm")
+	if err != nil {
+		t.Fatalf("second new --skip-llm error = %v (output %q)", err, out2)
+	}
+	after, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("re-read config: %v", err)
+	}
+	if string(after) != marker {
+		t.Error("second --skip-llm run overwrote the existing config file")
+	}
+	if !strings.Contains(out2, "using existing config") {
+		t.Errorf("second run does not report reusing the config: %q", out2)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "sessions"))
+	if err != nil {
+		t.Fatalf("sessions dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("got %d sessions, want both --skip-llm runs to create one", len(entries))
+	}
+}
+
+// TestNewProviderModelFlagsKeepWorking: --provider/--model settle the LLM
+// step (guided without prompts), so the scripting path is unchanged — the
+// session is created and no config template is written.
+func TestNewProviderModelFlagsKeepWorking(t *testing.T) {
+	_, configDir := isolatedDirs(t)
+
+	out, err := execute(t, "new", "--name", "Flagged", "--seed", "42",
+		"--provider", "openaicompat", "--model", "flag-model", "--no-tui")
+	if err != nil {
+		t.Fatalf("new --provider/--model error = %v (output %q)", err, out)
+	}
+	if id := parseCreatedID(t, out); id == "" {
+		t.Errorf("no session id in %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "config.toml")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("provider/model flags must not write a config file, stat = %v", err)
+	}
+}
+
+// TestNewMissingAPIKeyFailsActionably: with provider/model configured but
+// the effective api-key variable unset, play refuses before any session
+// exists — naming the variable and the config file, exit 1, no stack.
+func TestNewMissingAPIKeyFailsActionably(t *testing.T) {
+	dataDir, configDir := isolatedDirs(t)
+	writeConfig(t, filepath.Join(configDir, "config.toml"),
+		"[llm]\nprovider = \"deepseek\"\nmodel = \"deepseek-chat\"\n")
+	// The catalog default for deepseek; forced unset so the ambient
+	// environment cannot satisfy the probe.
+	t.Setenv("DEEPSEEK_API_KEY", "")
+
+	out, err := execute(t, "new", "--name", "No Key")
+	if err == nil {
+		t.Fatalf("new with an unset API key: want error, got nil (output %q)", out)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "$DEEPSEEK_API_KEY") {
+		t.Errorf("error = %q, want it to name $DEEPSEEK_API_KEY", msg)
+	}
+	if !strings.Contains(msg, filepath.Join(configDir, "config.toml")) {
+		t.Errorf("error = %q, want it to name the config path", msg)
+	}
+	assertNoSessions(t, dataDir)
 }
 
 // assertNoSessions fails when the data dir gained a session directory.

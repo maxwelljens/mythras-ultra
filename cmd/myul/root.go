@@ -170,12 +170,14 @@ func writeDefaultConfig(path string, force bool) error {
 	return nil
 }
 
-// newDoctorCmd validates the config and probes the decision model: the
-// reachability probe below, then the real decide client's model check.
+// newDoctorCmd validates the config, probes the LLM API key and probes the
+// decision model: the reachability probe below, then the real decide
+// client's model check. Probes report their findings but only config
+// errors fail the command.
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Validate the config and probe the decision model",
+		Short: "Validate the config, probe the API key and the decision model",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
@@ -185,6 +187,9 @@ func newDoctorCmd() *cobra.Command {
 			}
 			if _, err := fmt.Fprintf(out, "ok: config valid (%s)\n",
 				config.ResolveConfigPath(configPath)); err != nil {
+				return err
+			}
+			if err := probeAPIKeyEnv(out, cfg); err != nil {
 				return err
 			}
 			if !cfg.Decision.Enabled {
@@ -197,6 +202,26 @@ func newDoctorCmd() *cobra.Command {
 			return probeDecisionModelPresence(cmd, out, cfg)
 		},
 	}
+}
+
+// probeAPIKeyEnv reports whether the configured provider's effective
+// api-key environment variable (llm.api_key_env, else the embedded
+// catalog's default for the provider) holds a value: ok / failed: $XX
+// unset, or skipped when no key variable applies. Like the decision
+// probes, a missing key is reported but never fails the exit code —
+// doctor diagnoses, it does not gate.
+func probeAPIKeyEnv(out io.Writer, cfg *config.Config) error {
+	env := effectiveAPIKeyEnv(cfg.LLM)
+	if env == "" {
+		_, err := fmt.Fprintln(out, "skipped: no LLM api key env configured")
+		return err
+	}
+	if os.Getenv(env) == "" {
+		_, err := fmt.Fprintf(out, "failed: $%s unset\n", env)
+		return err
+	}
+	_, err := fmt.Fprintf(out, "ok: $%s set\n", env)
+	return err
 }
 
 // probeDecisionModelPresence asks the real decide client whether the
@@ -252,13 +277,26 @@ const defaultConfigTOML = `# myul configuration — written by ` + "`myul config
 # Precedence: MYUL_* environment variables > this file > built-in defaults.
 
 [llm]
-# Empty until you set them: a session cannot reach a provider without
-# provider and model.
+# The game master's provider and model. Empty until you set them: guided
+# myul new asks, or fill these in yourself. Any provider in the embedded
+# catalog works with just provider + model — api_key_env and base_url then
+# fall back to that provider's catalog defaults (explicit values below
+# always win). Examples (provider -> api_key_env):
+#   openai      -> $OPENAI_API_KEY       anthropic  -> $ANTHROPIC_API_KEY
+#   openrouter  -> $OPENROUTER_API_KEY   deepseek   -> $DEEPSEEK_API_KEY
+#   opencode-go -> $OPENCODE_API_KEY
 provider = ""
 model = ""
-# Name of the environment variable holding the API key — never the key.
+# Name of the environment variable holding the API key — never the key
+# itself. Empty -> the catalog default for the provider above.
 api_key_env = ""
-# Optional provider endpoint override.
+# Optional endpoint override. Catalog providers carry their own endpoint;
+# for an arbitrary OpenAI-compatible server, pick the nearest catalog
+# provider (or "openaicompat", the arbitrary-server adapter) and point
+# base_url at it, e.g.:
+#   provider = "openaicompat"
+#   base_url = "http://localhost:11434/v1"
+#   api_key_env = ""   # local servers usually need no key
 base_url = ""
 
 [decision]

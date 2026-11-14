@@ -255,6 +255,36 @@ func TestDoctorDecisionModelMissing(t *testing.T) {
 	}
 }
 
+// TestDoctorAPIKeyEnvProbe: doctor reports whether the configured
+// provider's effective api-key env variable is set — ok / failed: $XX
+// unset — resolving the variable from the catalog when the config leaves
+// api_key_env empty. Like the other probes it never fails the exit code.
+func TestDoctorAPIKeyEnvProbe(t *testing.T) {
+	blankEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path,
+		"[llm]\nprovider = \"deepseek\"\nmodel = \"deepseek-chat\"\n")
+	// Forced unset so the ambient environment cannot satisfy the probe.
+	t.Setenv("DEEPSEEK_API_KEY", "")
+
+	out, err := execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor with an unset API key must not fail: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "failed: $DEEPSEEK_API_KEY unset") {
+		t.Errorf("doctor output missing the unset-key line: %q", out)
+	}
+
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test-value")
+	out, err = execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "ok: $DEEPSEEK_API_KEY set") {
+		t.Errorf("doctor output missing the set-key line: %q", out)
+	}
+}
+
 // TestBareRootEmptyStore: with nothing to resume and no terminal, bare
 // `myul` prints how to start a session and exits 1 — guidance, not a
 // stack trace and not a hang.
