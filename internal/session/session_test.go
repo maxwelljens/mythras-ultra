@@ -98,27 +98,24 @@ func kindsOf(events []tui.Event) []tui.EventKind {
 	return kinds
 }
 
-// drainReplay reads exactly the events Resume replayed — one per chat line
-// log.jsonl held when the session was constructed (plus any resume note) —
-// and returns them, so a test can assert on the replayed play (reading the
-// session's internal queue would race the runner, which clears it once
-// delivered) or start from the fresh stream the runner produces afterwards.
-// The count comes from the log itself: replay is read-only, so nothing
-// records while it drains.
+// drainReplay reads exactly the events Resume replayed — the queue
+// replayEvents builds from the log (every chat line, always the recorded
+// dice, plus the tool annotations when the session replays them), plus any
+// resume note — and returns them, so a test can assert on the replayed
+// play (reading the session's internal queue would race the runner, which
+// clears it once delivered) or start from the fresh stream the runner
+// produces afterwards. The count comes from the log itself, through the
+// same function loadReplay uses: replay is read-only, so nothing records
+// while it drains.
 func drainReplay(t *testing.T, s *Session) []tui.Event {
 	t.Helper()
 	entries, err := s.store.ReadLog(s.ID())
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
-	var n int
-	for _, e := range entries {
-		if e.Chat != nil {
-			n++
-		}
-	}
-	events := make([]tui.Event, 0, n)
-	for range n {
+	want := replayEvents(entries, s.replayTools)
+	events := make([]tui.Event, 0, len(want))
+	for range len(want) {
 		events = append(events, nextEvent(t, s))
 	}
 	return events
@@ -717,7 +714,7 @@ func TestResumeContinuesRNGStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	drainReplay(t, continued) // the roll recorded no chat lines: replay yields nothing
+	drainReplay(t, continued) // the roll recorded no chat lines — only its dice replay
 	gotSecond := rollTotal(t, continued)
 	if err := continued.Close(); err != nil {
 		t.Fatalf("Close resumed: %v", err)
@@ -733,8 +730,9 @@ func TestResumeContinuesRNGStream(t *testing.T) {
 // TestMetadataSheet pins the sheet block behind the palette's Character
 // sheet overlay: the same PC lookup as the vitals builder, the fixed
 // characteristic order, the derived readouts as the engine reports them,
-// skills sorted value-descending then name — and the zero value while no
-// player character exists yet.
+// skills sectioned by catalogue category and sorted value-descending then
+// name inside each section — and the zero value while no player character
+// exists yet.
 func TestMetadataSheet(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted())
 	st := s.state
@@ -788,16 +786,21 @@ func TestMetadataSheet(t *testing.T) {
 			t.Errorf("derived row %d = %q, want %q", i, sh.Derived[i].Name, name)
 		}
 	}
-	if len(sh.Skills) == 0 {
-		t.Fatal("culture/career should have granted skills")
+	if len(sh.SkillGroups) == 0 {
+		t.Fatal("culture/career should have granted skills, sectioned by category")
 	}
-	for i := 1; i < len(sh.Skills); i++ {
-		prev, cur := sh.Skills[i-1], sh.Skills[i]
-		prevVal, _ := strconv.Atoi(strings.TrimSuffix(prev.Value, "%"))
-		curVal, _ := strconv.Atoi(strings.TrimSuffix(cur.Value, "%"))
-		if prevVal < curVal || (prevVal == curVal && prev.Name >= cur.Name) {
-			t.Errorf("skills out of order at %d: %s %s then %s %s (value desc, then name)",
-				i, prev.Name, prev.Value, cur.Name, cur.Value)
+	for _, group := range sh.SkillGroups {
+		if group.Name == "" {
+			t.Error("skill group must carry its section title")
+		}
+		for i := 1; i < len(group.Rows); i++ {
+			prev, cur := group.Rows[i-1], group.Rows[i]
+			prevVal, _ := strconv.Atoi(strings.TrimSuffix(prev.Value, "%"))
+			curVal, _ := strconv.Atoi(strings.TrimSuffix(cur.Value, "%"))
+			if prevVal < curVal || (prevVal == curVal && prev.Name >= cur.Name) {
+				t.Errorf("%s out of order at %d: %s %s then %s %s (value desc, then name)",
+					group.Name, i, prev.Name, prev.Value, cur.Name, cur.Value)
+			}
 		}
 	}
 	if len(sh.Locations) == 0 {
@@ -1343,5 +1346,244 @@ func TestResumeWithoutChatStartsEmptyWithNote(t *testing.T) {
 	echo := nextEvent(t, resumed)
 	if echo.Kind != tui.EventNarrative || echo.Markdown != "I listen." {
 		t.Errorf("second event = %+v, want the replayed echo after the note", echo)
+	}
+}
+
+// TestStreamFlushesMidParagraphAndRecordsOnce pins the streaming split: a
+// paragraph longer than partialNarrativeMin is displayed in eager batches
+// — the first opens the entry, the rest continue it — while the log
+// records exactly ONE chat line for the whole paragraph. Display and
+// recording are separate paths.
+func TestStreamFlushesMidParagraphAndRecordsOnce(t *testing.T) {
+	line := "The lantern gutters and the draught answers somewhere down the corridor."
+	content := line + "\n" + line + "\n" + line + "\n" + line // one paragraph, four deltas
+	client := llm.NewScripted(scriptedText(content))
+	s := newTestSession(t, client)
+
+	const sent = "I lift the lantern."
+	if err := s.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	events := nextEvents(t, s, 7) // echo, thinking, four batches, turn end
+
+	var built strings.Builder
+	for i := 2; i <= 5; i++ {
+		if events[i].Kind != tui.EventNarrative {
+			t.Fatalf("event %d = %v, want a narrative batch (sequence %v)", i, events[i].Kind, kindsOf(events))
+		}
+		built.WriteString(events[i].Markdown)
+	}
+	if built.String() != content {
+		t.Errorf("batches concatenate to %q, want the reply verbatim", built.String())
+	}
+	if events[2].Continuation {
+		t.Error("the first batch must open the entry, not continue one")
+	}
+	for i := 3; i <= 5; i++ {
+		if !events[i].Continuation {
+			t.Errorf("batch %d should extend the entry already on screen", i-1)
+		}
+	}
+	if ev := events[6]; ev.Kind != tui.EventTurnEnd {
+		t.Errorf("last event = %v, want the turn end", ev.Kind)
+	}
+
+	entries, err := s.store.ReadLog(s.ID())
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	chat := 0
+	for _, e := range entries {
+		if e.Kind != chatLogKind {
+			continue
+		}
+		chat++
+		if e.Chat.Player {
+			continue
+		}
+		if e.Chat.Text != content {
+			t.Errorf("recorded GM line = %q, want the whole paragraph once", e.Chat.Text)
+		}
+	}
+	if chat != 2 {
+		t.Errorf("chat lines = %d, want 2 (the echo and ONE line for the paragraph)", chat)
+	}
+}
+
+// TestStreamRecordsOneChatLinePerParagraph pins the close rule: every
+// "\n\n" closes the entry — its tail is displayed, its text recorded once
+// — so a two-paragraph reply lands as two display events (each opening
+// its own entry) and two chat lines, in order.
+func TestStreamRecordsOneChatLinePerParagraph(t *testing.T) {
+	const (
+		paraOne = "The ferryman counts his coins and says nothing at all."
+		paraTwo = "Behind you, the ferry slips its rope."
+	)
+	client := llm.NewScripted(scriptedText(paraOne + "\n\n" + paraTwo))
+	s := newTestSession(t, client)
+
+	const sent = "I pay the ferryman."
+	if err := s.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	events := nextEvents(t, s, 5) // echo, thinking, paragraph one, paragraph two, turn end
+	if events[2].Kind != tui.EventNarrative || strings.TrimSpace(events[2].Markdown) != paraOne {
+		t.Errorf("third event = %+v, want the first paragraph", events[2])
+	}
+	if events[3].Kind != tui.EventNarrative || events[3].Markdown != paraTwo {
+		t.Errorf("fourth event = %+v, want the second paragraph", events[3])
+	}
+	if events[2].Continuation || events[3].Continuation {
+		t.Errorf("each paragraph opens its own entry: continuations = %v, %v",
+			events[2].Continuation, events[3].Continuation)
+	}
+
+	entries, err := s.store.ReadLog(s.ID())
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	var lines []string
+	for _, e := range entries {
+		if e.Kind == chatLogKind && !e.Chat.Player {
+			lines = append(lines, e.Chat.Text)
+		}
+	}
+	want := []string{paraOne + "\n\n", paraTwo}
+	if !equalStrings(lines, want) {
+		t.Errorf("recorded GM lines = %q, want one per paragraph %q", lines, want)
+	}
+}
+
+// TestResumeReplaysDiceAndOptionalAnnotations pins the resume contract:
+// recorded dice always come back as finished banners (Replay set, in log
+// order, never re-recorded), the tool strip in front of its dice joins
+// them only with Config.ReplayTools, and the session-start entry — no
+// tool dispatch — earns neither.
+func TestResumeReplaysDiceAndOptionalAnnotations(t *testing.T) {
+	root := t.TempDir()
+	client := llm.NewScripted(
+		toolTurn(llm.ToolCall{ID: "t1", Name: "roll_dice",
+			Args: json.RawMessage(`{"expr":"2d6+1","reason":"omen"}`)}),
+		scriptedText("The omens are mixed."),
+	)
+	cfg := func(replayTools bool) Config {
+		return Config{
+			Name:        "Replay Dice",
+			Seed:        7,
+			Store:       state.NewJSONStore(root, nil),
+			Client:      client,
+			Registry:    tools.NewRegistry(nil),
+			SessionsDir: filepath.Join(root, "sessions"),
+			Autosave:    true,
+			ReplayTools: replayTools,
+		}
+	}
+	first, err := New(cfg(false))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const sent = "I ask for a sign."
+	if err := first.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	live := nextEvents(t, first, 7) // echo, thinking, annotation, dice, thinking, narration, turn end
+	if live[3].Kind != tui.EventDice || live[3].Replay {
+		t.Fatalf("live roll = kind %v replay %t, want a fresh dice event", live[3].Kind, live[3].Replay)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	before, err := first.store.ReadLog(first.ID())
+	if err != nil {
+		t.Fatalf("ReadLog before resume: %v", err)
+	}
+
+	// Dice replay without the annotation strips.
+	off, err := Resume(cfg(false), first.ID())
+	if err != nil {
+		t.Fatalf("Resume without replay_tools: %v", err)
+	}
+	evs := drainReplay(t, off)
+	if len(evs) != 3 {
+		t.Fatalf("replay = %d events, want 3 (echo, dice, narration): %v", len(evs), kindsOf(evs))
+	}
+	for i, ev := range evs {
+		if !ev.Replay {
+			t.Errorf("event %d is not flagged Replay: %+v", i, ev)
+		}
+	}
+	if ev := evs[0]; ev.Kind != tui.EventNarrative || !ev.Player || ev.Markdown != sent {
+		t.Errorf("first replayed event = %+v, want the recorded echo", ev)
+	}
+	if ev := evs[1]; ev.Kind != tui.EventDice || ev.Dice == nil || ev.Dice.Expr != "2d6+1" {
+		t.Errorf("second replayed event = %+v, want the recorded roll", ev)
+	}
+	if ev := evs[2]; ev.Kind != tui.EventNarrative || ev.Markdown != "The omens are mixed." {
+		t.Errorf("third replayed event = %+v, want the recorded narration", ev)
+	}
+	if err := off.Close(); err != nil {
+		t.Fatalf("Close (replay off): %v", err)
+	}
+
+	// ReplayTools adds the annotation in front of its dice, still in log order.
+	on, err := Resume(cfg(true), first.ID())
+	if err != nil {
+		t.Fatalf("Resume with replay_tools: %v", err)
+	}
+	evs = drainReplay(t, on)
+	if len(evs) != 4 {
+		t.Fatalf("replay = %d events, want 4 (echo, annotation, dice, narration): %v", len(evs), kindsOf(evs))
+	}
+	ann := evs[1]
+	if ann.Kind != tui.EventToolAnnotation || ann.Annotation == nil {
+		t.Fatalf("second replayed event = %+v, want the tool annotation", ann)
+	}
+	if ann.Annotation.ToolName != "roll_dice" || !ann.Annotation.OK || ann.Annotation.Summary == "" {
+		t.Errorf("annotation = %+v, want the recorded roll_dice strip", ann.Annotation)
+	}
+	if evs[2].Kind != tui.EventDice {
+		t.Errorf("third replayed event = %v, want the dice right behind its annotation", evs[2].Kind)
+	}
+	after, err := on.store.ReadLog(on.ID())
+	if err != nil {
+		t.Fatalf("ReadLog after replay: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("log grew across replay: %d → %d entries, want no duplicates", len(before), len(after))
+	}
+	if err := on.Close(); err != nil {
+		t.Fatalf("Close (replay on): %v", err)
+	}
+}
+
+// TestUsageFeedsContextReadout pins the advisory usage path: the Stream
+// loop's StreamDone usage becomes Metadata.ContextUsage — the tokens the
+// call just saw against the configured window — while a session without a
+// configured window reports an unknown (zero) one, and no call yet
+// reports nothing at all.
+func TestUsageFeedsContextReadout(t *testing.T) {
+	turn := llm.ScriptedTurn{Response: llm.ChatResponse{
+		Message: llm.Message{Role: llm.RoleAssistant, Content: "The tide turns."},
+		Usage:   llm.Usage{InputTokens: 42340, OutputTokens: 900},
+	}}
+	s := newTestSession(t, llm.NewScripted(turn), func(c *Config) { c.ContextWindow = 128000 })
+	if got := s.Metadata().ContextUsage; got.Tokens != 0 {
+		t.Fatalf("context usage before any call = %+v, want no tokens yet", got)
+	}
+	if err := s.Send(t.Context(), tui.ChannelIC, "I watch the tide."); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, s, 4)
+	if got := s.Metadata().ContextUsage; got.Tokens != 42340 || got.Window != 128000 {
+		t.Errorf("context usage = %+v, want 42340 tokens against the configured 128000 window", got)
+	}
+
+	unknown := newTestSession(t, llm.NewScripted(turn))
+	if err := unknown.Send(t.Context(), tui.ChannelIC, "And the tide again."); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, unknown, 4)
+	if got := unknown.Metadata().ContextUsage; got.Tokens != 42340 || got.Window != 0 {
+		t.Errorf("context usage = %+v, want the tokens with an unknown (0) window", got)
 	}
 }

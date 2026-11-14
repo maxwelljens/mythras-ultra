@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	// maxNarrativeBatch bounds how much streamed text accumulates before it
-	// is flushed as one EventNarrative when the model emits no newline.
-	maxNarrativeBatch = 4096
+	// partialNarrativeMin is how many bytes of one paragraph may wait on
+	// display before the stream shows them: paragraph boundaries still
+	// close the entry, but an unbroken run now appears in batches instead
+	// of sitting invisible until the next "\n\n".
+	partialNarrativeMin = 64
 	// oocTag prefixes player text sent on the OOC channel so the model sees
 	// the channel even though providers carry no such concept; the TUI
 	// tags its own transcript line from Event.Channel instead. The system
@@ -56,13 +58,41 @@ func stripChannelTag(text string) string {
 // leading channel marker stripped, and records it as a GM chat line (the
 // sanitised text — the log holds what the player saw). A message that is
 // only the marker emits nothing — the marker is dropped, whatever follows
-// it still flows as the next narrative event.
+// it still flows as the next narrative event. It is the single-batch path
+// (the Chat fallback); streamed paragraphs go through the display/record
+// split below.
 func (s *Session) emitNarrative(ch tui.Channel, text string) {
 	body := stripChannelTag(text)
 	if strings.TrimSpace(body) == "" {
 		return
 	}
 	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body}, false)
+}
+
+// emitNarrativeBatch sends one display batch of model output to the
+// transcript WITHOUT recording it: batches only feed the screen, and the
+// chat line is written once when the entry closes. Sanitation matches the
+// recording path — the leading channel marker is stripped and a
+// whitespace-only batch emits nothing.
+func (s *Session) emitNarrativeBatch(ch tui.Channel, text string, continuation bool) {
+	body := stripChannelTag(text)
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	s.emit(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body,
+		Continuation: continuation})
+}
+
+// recordNarrative records one closed entry as a GM chat line — the
+// sanitised text, what the player saw across every batch of that entry.
+// The whitespace-only guard mirrors the display path, so a bare paragraph
+// break records nothing.
+func (s *Session) recordNarrative(ch tui.Channel, text string) {
+	body := stripChannelTag(text)
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	s.recordChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body}, false)
 }
 
 // run is the session's single runner goroutine: it first delivers whatever
@@ -309,13 +339,52 @@ func (s *Session) systemPrompt() (string, error) {
 	})
 }
 
+// streamEntry is the paragraph one model reply currently has open.
+//
+// State, owned by the single runner goroutine (no locking): text is every
+// delta of the reply so far, start is where the open entry begins in text
+// and sent is how far the display has advanced past it. Closing the entry
+// at a "\n\n" boundary flushes the tail [sent:end], records the whole
+// entry [start:end] exactly once and jumps start and sent past the
+// boundary, so the next paragraph opens fresh; the end of the reply closes
+// it the same way at len(text). Display batches (rest) never record —
+// only a close does.
+type streamEntry struct {
+	text  string
+	start int
+	sent  int
+}
+
+// rest returns the entry's undisplayed tail and whether showing it
+// extends an entry already on screen, then marks the tail shown.
+func (e *streamEntry) rest() (tail string, continuation bool) {
+	tail, continuation = e.text[e.sent:], e.sent > e.start
+	e.sent = len(e.text)
+	return tail, continuation
+}
+
+// closeAt closes the entry at end (just past a "\n\n", or len(text) at the
+// end of the reply): the still-undisplayed tail first (see rest), then the
+// whole entry text for the caller to record — empty when the entry is
+// whitespace-only, the blank-entry guard that keeps a paragraph break from
+// becoming a transcript entry.
+func (e *streamEntry) closeAt(end int) (tail string, continuation bool, record string) {
+	tail, continuation = e.text[e.sent:end], e.sent > e.start
+	record = e.text[e.start:end]
+	e.start, e.sent = end, end
+	return tail, continuation, record
+}
+
 // callModel asks the model for the next message, streaming narration into
-// the transcript as it arrives: each paragraph-terminated batch (or, for a
-// long single-paragraph passage, each maxNarrativeBatch-sized chunk) becomes
-// one EventNarrative, and the last fragment is flushed when the reply ends. A
-// stream that fails before producing anything falls back to a single Chat
-// call — a client may be chat-only — while a stream that fails midway is a
-// model failure the caller rolls back (session-loop.md failure policy).
+// the transcript as it arrives. Display and recording are separate paths:
+// every batch — the tail at a paragraph boundary, an eager flush once an
+// unbroken run reaches partialNarrativeMin bytes, and the remainder when
+// the reply ends — is emitted for display (Continuation when it extends
+// the entry on screen), while the paragraph itself is recorded as ONE chat
+// line when its entry closes. A stream that fails before producing
+// anything falls back to a single Chat call — a client may be chat-only —
+// while a stream that fails midway is a model failure the caller rolls
+// back (session-loop.md failure policy).
 func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) {
 	if s.client == nil {
 		return reply{}, ErrNoClient
@@ -326,64 +395,74 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 	// and never fires for a session without a client.
 	s.emit(tui.Event{Kind: tui.EventThinking, Channel: ch})
 	var (
-		r       reply
-		got     bool
-		full    strings.Builder
-		pending string
+		r   reply
+		got bool
+		ent streamEntry
 	)
-	flush := func() {
-		if pending != "" {
-			s.emitNarrative(ch, pending)
-			pending = ""
-		}
-	}
 	err := s.client.Stream(s.ctx, req, func(ev llm.StreamEvent) error {
 		got = true
 		switch ev.Kind {
 		case llm.StreamTextDelta:
-			full.WriteString(ev.Text)
-			pending += ev.Text
-			if i := strings.Index(pending, "\n\n"); i >= 0 {
-				// Flush at paragraph boundaries, not every newline: an
-				// entry is a complete Markdown paragraph, so the
-				// transcript's "\n\n" join lands exactly one blank line
-				// between paragraphs (line-level flushes rendered as
-				// extra blank lines). Whitespace-only batches (e.g. a
-				// stream opening with "\n\n") are dropped — the join
-				// already supplies the separation.
-				if batch := pending[:i+2]; strings.TrimSpace(batch) != "" {
-					s.emitNarrative(ch, batch)
+			ent.text += ev.Text
+			// Every "\n\n" in the open entry closes it: flush the
+			// tail, record the paragraph once, open the next one.
+			for {
+				rel := strings.Index(ent.text[ent.start:], "\n\n")
+				if rel < 0 {
+					break
 				}
-				pending = pending[i+2:]
-			} else if len(pending) >= maxNarrativeBatch {
-				flush()
+				s.closeEntry(ch, &ent, ent.start+rel+2)
+			}
+			// No boundary: show what has piled up so mid-paragraph
+			// text is not invisible — display only, the entry stays
+			// open until its paragraph ends.
+			if len(ent.text)-ent.sent >= partialNarrativeMin {
+				tail, cont := ent.rest()
+				s.emitNarrativeBatch(ch, tail, cont)
 			}
 		case llm.StreamToolCall:
 			r.calls = append(r.calls, ev.ToolCall)
 		case llm.StreamDone:
-			// Usage is deliberately unused: compaction windows by
-			// message count (HistoryWindow), not by tokens.
+			// Usage is advisory display data (the footer's context
+			// readout), not a compaction input: the window still
+			// counts messages (HistoryWindow).
+			s.noteUsage(ev.Usage.InputTokens)
 		}
 		return nil
 	})
 	switch {
 	case err == nil:
-		flush()
-		r.text = full.String()
+		s.closeEntry(ch, &ent, len(ent.text)) // flush the remainder, record once
+		r.text = ent.text
 		return r, nil
 	case !got:
 		// The stream never started — fall back to one Chat round trip.
+		s.closeEntry(ch, &ent, len(ent.text)) // no delta ever arrived: nothing to close
 		resp, cerr := s.client.Chat(s.ctx, req)
-		flush()
 		if cerr != nil {
 			return reply{}, fmt.Errorf("chat: %w", cerr)
 		}
+		s.noteUsage(resp.Usage.InputTokens)
 		s.emitNarrative(ch, resp.Message.Content)
 		return reply{text: resp.Message.Content, calls: resp.Message.ToolCalls}, nil
 	default:
-		flush()
+		// A failed stream still closes its entry: the text the player
+		// already saw is displayed and recorded once, then the caller
+		// rolls the turn back.
+		s.closeEntry(ch, &ent, len(ent.text))
 		return reply{}, fmt.Errorf("stream: %w", err)
 	}
+}
+
+// closeEntry closes the entry at end: the undisplayed tail is emitted as
+// one batch (continuing the entry on screen when one is already open) and
+// the whole entry is recorded as exactly one chat line. Every path through
+// callModel ends here, so a paragraph can never be recorded twice — or
+// displayed and never recorded.
+func (s *Session) closeEntry(ch tui.Channel, ent *streamEntry, end int) {
+	batch, cont, record := ent.closeAt(end)
+	s.emitNarrativeBatch(ch, batch, cont)
+	s.recordNarrative(ch, record)
 }
 
 // runTool dispatches one tool call against the live state and reports it:
@@ -415,7 +494,7 @@ func (s *Session) runTool(ch tui.Channel, call llm.ToolCall) tools.Result {
 			OK:       res.OK,
 		},
 	})
-	for _, de := range diceEvents(res) {
+	for _, de := range diceEvents(res.Audit, res.Facts) {
 		ev := de
 		s.emit(tui.Event{Kind: tui.EventDice, Channel: ch, Dice: &ev})
 	}
@@ -439,17 +518,19 @@ func (s *Session) failTurn(ch tui.Channel, rollback int, err error) {
 		Markdown: fmt.Sprintf("turn failed: %v (the turn was rolled back — try again)", err)}, false)
 }
 
-// diceEvents projects a tool result's audit rolls onto the theatre: dice
-// values, modifier and total come from the roll itself, the outcome grade
-// from the result's "outcome: <grade>" fact when it reports one (the
-// engine's own vocabulary — critical, success, failure, fumble).
-func diceEvents(res tools.Result) []tui.DiceEvent {
-	if res.Audit == nil {
+// diceEvents projects an audit's rolls onto the theatre: dice values,
+// modifier and total come from the roll itself, the outcome grade from the
+// result's "outcome: <grade>" fact when it reports one (the engine's own
+// vocabulary — critical, success, failure, fumble). It is the one mapping
+// from log audit to display, shared by a live dispatch (runTool) and by
+// the replay of recorded results (replayEvents) so the two cannot drift.
+func diceEvents(audit *resolve.Audit, facts []string) []tui.DiceEvent {
+	if audit == nil {
 		return nil
 	}
-	outcomes := gradeOutcomes(res.Facts)
-	events := make([]tui.DiceEvent, 0, len(res.Audit.Rolls))
-	for i, roll := range res.Audit.Rolls {
+	outcomes := gradeOutcomes(facts)
+	events := make([]tui.DiceEvent, 0, len(audit.Rolls))
+	for i, roll := range audit.Rolls {
 		de := tui.DiceEvent{
 			Expr:     roll.Expr,
 			Dice:     make([]int, len(roll.Dice)),

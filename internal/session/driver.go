@@ -116,11 +116,14 @@ func (s *Session) Events() <-chan tui.Event { return s.events }
 
 // Metadata returns a fresh display snapshot of the state behind the panel:
 // a cheap read-through under the read lock, never a model call
-// (tui.Driver). See buildMetadata for how state shapes map to the panel.
+// (tui.Driver). See buildMetadata for how state shapes map to the panel;
+// the context readout joins it from the last model call's usage.
 func (s *Session) Metadata() tui.Metadata {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return buildMetadata(s.state)
+	m := buildMetadata(s.state)
+	m.ContextUsage = tui.ContextUsage{Tokens: s.contextTokens, Window: s.contextWindow}
+	return m
 }
 
 // Close releases the session: it stops the runner (cancelling any in-flight

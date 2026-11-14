@@ -123,6 +123,8 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 		Autosave:      cfg.Game.Autosave,
 		MaxToolRounds: cfg.Game.MaxToolRounds,
 		HistoryWindow: 0, // session default (32 messages)
+		ReplayTools:   cfg.UI.ReplayTools,
+		ContextWindow: contextWindow(cfg.LLM),
 	}
 
 	sess, err := startSession(scfg, opts)
@@ -290,6 +292,28 @@ func modelLabel(cfg config.LLMConfig) string {
 	default:
 		return cfg.Provider
 	}
+}
+
+// contextWindow resolves the model's context window in tokens for the
+// footer's context readout: the config's [llm] context_window wins, else
+// the embedded catalog's entry for the configured provider and model,
+// else 0 — unknown, which the footer renders as tokens without a
+// percentage. Catalogs go stale and model ids are free-form, so 0 is a
+// supported state, never an error.
+func contextWindow(cfg config.LLMConfig) int {
+	if cfg.ContextWindow > 0 {
+		return cfg.ContextWindow
+	}
+	info, err := llm.ResolveProvider(cfg.Provider)
+	if err != nil {
+		return 0 // not a catalog provider (e.g. openaicompat)
+	}
+	for _, model := range info.Models {
+		if model.ModelID == cfg.Model {
+			return int(model.ContextWindow)
+		}
+	}
+	return 0
 }
 
 // isTerminal reports whether the command's input and output are both real

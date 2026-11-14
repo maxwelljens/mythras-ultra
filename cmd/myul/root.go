@@ -449,6 +449,10 @@ model = ""
 # Name of the environment variable holding the API key — never the key
 # itself. Empty -> the catalog default for the provider above.
 api_key_env = ""
+# Model context window in tokens for the footer's context readout. 0 =
+# unknown. The embedded catalog usually supplies it for the model above —
+# this is the fallback for custom or stale-catalog models.
+context_window = 0
 # Optional endpoint override. base_url accepts the provider base
 # (".../v1") or the full endpoint (".../v1/chat/completions") — the
 # endpoint suffix is stripped automatically. Catalog providers carry
@@ -494,6 +498,8 @@ max_tool_rounds = 200
 theme = "mythras"
 dice_animation = true
 metadata_default = false
+# Replay tool annotations from the log on resume (dice always replay).
+replay_tools = false
 # One of "adaptive", "16", "terminal".
 colour_mode = "adaptive"
 

@@ -60,10 +60,18 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
       (`Config.MaxToolRounds`, `config.game.max_tool_rounds`, default 200)
       — on overflow, drop the unanswered calls and stop with an `EventError`
       naming the configured cap.
-3. Assistant text: stream as `EventNarrative` deltas; a leading `[ic]` /
-   `[ooc]` marker the model wrote inline is stripped before emission (the
-   TUI derives the channel from `Event.Channel` — model output only, never
-   the player's echo); on completion append to history.
+3. Assistant text: stream as `EventNarrative` batches — at each `\n\n`
+   boundary, eagerly once an unbroken run reaches `partialNarrativeMin`
+   bytes, and for the remainder when the reply ends — each flagged
+   `Continuation` when it extends the entry already on screen (the TUI
+   appends it, so mid-paragraph text is no longer invisible while
+   paragraphs stay whole entries). A leading `[ic]` / `[ooc]` marker the
+   model wrote inline is stripped before emission (the TUI derives the
+   channel from `Event.Channel` — model output only, never the player's
+   echo). Display and recording are separate: the paragraph is recorded as
+   ONE chat line when its entry closes — at the boundary or at the end of
+   the reply, error path included — so replay keeps producing
+   whole-paragraph entries. On completion append to history.
 4. OOC channel: same loop but tag the message `[ooc]`; the prompt instructs
    the GM to reply out of character and perform no moves unless the player
    confirms.
@@ -86,12 +94,17 @@ The conversation and the play text survive the process:
   moves behind them are already in the log. Recording happens inline on
   the runner goroutine, so chat and move entries interleave in true play
   order.
-- **Replay** — `Resume` rebuilds the recorded chat lines into events
-  (original order and timestamps) and queues them; the runner delivers
-  the queue before it processes any input. Replay bypasses `emitChat`,
-  so it never re-records — only freshly produced events touch the log.
-  `transcript.md` renders the same interleaving: `**You:** ` prefixed
-  player lines, GM text verbatim, move annotations alongside.
+- **Replay** — `Resume` rebuilds the recorded play into events (original
+  order and timestamps) and queues them; the runner delivers the queue
+  before it processes any input. Chat lines replay as the events they were
+  recorded from; every recorded `Audit.Rolls` replays as an `EventDice`,
+  and with `Config.ReplayTools` (`ui.replay_tools`, default off) the tool
+  annotation that preceded those dice replays in front of them. All of
+  them carry `Event.Replay`, so the TUI renders a roll as its finished
+  banner instead of performing the dice theatre again. Replay bypasses
+  `emitChat`, so it never re-records — only freshly produced events touch
+  the log. `transcript.md` renders the same interleaving: `**You:** `
+  prefixed player lines, GM text verbatim, move annotations alongside.
 - **Preferences (`meta.json`)** — the IC/OOC mode last in use, written
   atomically on every switch (`Store.SaveMeta`) and read at construction
   (`Store.LoadMeta`); absent or corrupt bytes degrade to the in-character
@@ -115,7 +128,10 @@ is windowed to the last `Config.HistoryWindow` messages (default 32), the
 older turns replaced by one summary produced through the same `llm.Client`.
 If that summarisation call fails, everything is kept verbatim and a note
 lands in the transcript — compaction is an optimisation, never a data loss.
-The window counts messages, not tokens (`Usage` is deliberately unused).
+The window counts messages, not tokens: `Usage` is advisory display data
+only — the last call's input tokens feed the footer's context readout
+(`Metadata.ContextUsage`; the window comes from `llm.context_window` or
+the embedded catalog) and never drive compaction.
 
 ## Failure policy
 

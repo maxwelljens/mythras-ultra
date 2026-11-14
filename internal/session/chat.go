@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mythras-ultra/myul/internal/engine/resolve"
 	"github.com/mythras-ultra/myul/internal/harness/llm"
 	"github.com/mythras-ultra/myul/internal/state"
 	"github.com/mythras-ultra/myul/internal/tui"
@@ -60,10 +61,12 @@ func (s *Session) loadChat() {
 }
 
 // loadReplay rebuilds the prior play from log.jsonl at construction
-// (Resume): every chat entry becomes the event it was recorded from, in
-// recorded order, carrying its original timestamp, queued after any
-// resume notice loadChat added. The runner delivers the queue before it
-// processes any input (run), so the TUI shows the play history
+// (Resume): every chat line becomes the event it was recorded from, every
+// recorded dice roll comes back as a finished banner, and — with
+// Config.ReplayTools — the tool annotation that preceded those dice, all
+// in recorded order, carrying their original timestamps and the Replay
+// flag the TUI renders history with. The runner delivers the queue before
+// it processes any input (run), so the TUI shows the play history
 // immediately — and because they come from the log they bypass emitChat
 // entirely: replay never re-records. A log that cannot be read costs the
 // replay only (the reason joins the queue as a system event); the
@@ -75,18 +78,84 @@ func (s *Session) loadReplay() {
 			"could not replay the earlier play (%v) — the recorded transcript on disk is unaffected", err)})
 		return
 	}
+	s.replay = append(s.replay, replayEvents(entries, s.replayTools)...)
+}
+
+// replayResult is what a log entry's Result carries: a tool result states
+// OK, while the session-start entry records a plain resolve.Result, which
+// has no OK field — its absence marks the entry as something other than a
+// tool dispatch, so it earns no annotation on replay.
+type replayResult struct {
+	OK      *bool          `json:"ok"`
+	Summary string         `json:"summary"`
+	Facts   []string       `json:"facts"`
+	Audit   *resolve.Audit `json:"audit,omitempty"`
+}
+
+// replayEvents turns recorded log entries into the events Resume queues —
+// the pure half of loadReplay, shared with the tests so the queue they
+// drain is the queue the runner delivers:
+//
+//   - every chat line, as the event it was recorded from;
+//   - every result's audit rolls, always — resume shows the rolls that
+//     happened as finished banners (Replay stops the TUI performing them
+//     again), with the tool annotation in front of its dice when
+//     replayTools is set (config ui.replay_tools);
+//   - nothing else: annotations and dice are transient, so only what a
+//     Result carries can be replayed.
+//
+// Entries keep log order, and annotation + dice stay together per entry.
+// Moves carry no channel, so dice and annotations follow the channel of
+// the chat line last recorded before them. An undecodable Result costs
+// that entry's replay only and says so as a system event.
+func replayEvents(entries []state.LogEntry, replayTools bool) []tui.Event {
+	var (
+		out []tui.Event
+		ch  tui.Channel // moves record no channel: follow the play around them
+	)
 	for _, e := range entries {
-		if e.Chat == nil {
+		if e.Chat != nil {
+			ch = replayChannel(e.Chat.Channel)
+			out = append(out, tui.Event{
+				Kind:     replayKind(e.Chat.Kind),
+				Channel:  ch,
+				Markdown: e.Chat.Text,
+				At:       e.At,
+				Player:   e.Chat.Player,
+				Replay:   true,
+			})
 			continue
 		}
-		s.replay = append(s.replay, tui.Event{
-			Kind:     replayKind(e.Chat.Kind),
-			Channel:  replayChannel(e.Chat.Channel),
-			Markdown: e.Chat.Text,
-			At:       e.At,
-			Player:   e.Chat.Player,
-		})
+		if len(e.Result) == 0 {
+			continue
+		}
+		var res replayResult
+		if err := json.Unmarshal(e.Result, &res); err != nil {
+			out = append(out, tui.Event{Kind: tui.EventSystem, At: e.At, Replay: true,
+				Markdown: fmt.Sprintf("could not replay the dice of the recorded %q entry (%v) — the recorded transcript on disk is unaffected",
+					e.Kind, err)})
+			continue
+		}
+		if replayTools && res.OK != nil {
+			out = append(out, tui.Event{
+				Kind:    tui.EventToolAnnotation,
+				Channel: ch,
+				At:      e.At,
+				Replay:  true,
+				Annotation: &tui.Annotation{
+					ToolName: e.Kind,
+					Summary:  res.Summary,
+					OK:       *res.OK,
+				},
+			})
+		}
+		for _, de := range diceEvents(res.Audit, res.Facts) {
+			ev := de
+			out = append(out, tui.Event{Kind: tui.EventDice, Channel: ch, At: e.At,
+				Replay: true, Dice: &ev})
+		}
 	}
+	return out
 }
 
 // emitChat delivers one play-text event — the player's echo, the GM's
@@ -95,12 +164,19 @@ func (s *Session) loadReplay() {
 // one that records moves, which is what keeps the log in true play order.
 // Play text is the only thing chat-recorded: system confirmations,
 // thinking, turn-end, annotations and dice are transient (the moves they
-// summarise are already in the log). A record failure surfaces as an
+// summarise are already in the log).
+func (s *Session) emitChat(ev tui.Event, player bool) {
+	s.emit(ev)
+	s.recordChat(ev, player)
+}
+
+// recordChat appends one play-text event to log.jsonl as a chat line — the
+// split-out half of emitChat, for streamed narrative whose display batches
+// were emitted before its entry closed. A record failure surfaces as an
 // error line that is deliberately not recorded itself — the append that
 // just failed would fail again, so recursing there only spins; later move
 // records keep failing loudly on their own.
-func (s *Session) emitChat(ev tui.Event, player bool) {
-	s.emit(ev)
+func (s *Session) recordChat(ev tui.Event, player bool) {
 	kind := chatKindNarrative
 	if ev.Kind == tui.EventError {
 		kind = chatKindError

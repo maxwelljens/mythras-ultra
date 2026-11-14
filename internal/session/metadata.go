@@ -98,19 +98,21 @@ func characterName(c *char.Character) string {
 // player character. It reads the same cached char.Derived snapshot the
 // vitals builder reads (the engine refreshes it; the TUI never derives
 // numbers), keeps the fixed characteristic order and sorts every mapped
-// list by value descending, then name — never map order.
+// list by value descending, then name — never map order. Skills arrive
+// sectioned by the catalogue's categories (skillGroups); Styles, Passions
+// and the flat lists keep the shared rated order.
 func sheetFor(c *char.Character) tui.Sheet {
 	s := tui.Sheet{
-		Name:       characterName(c),
-		Culture:    c.Culture,
-		Career:     c.Career,
-		Concept:    oneLine(c.Concept),
-		Skills:     ratedRows(skillMapRows(c)),
-		Styles:     ratedRows(styleRows(c)),
-		Passions:   ratedRows(passionRows(c)),
-		Inventory:  inventoryLines(c),
-		Locations:  locationRows(c),
-		Conditions: conditionLabels(c),
+		Name:        characterName(c),
+		Culture:     c.Culture,
+		Career:      c.Career,
+		Concept:     oneLine(c.Concept),
+		SkillGroups: skillGroups(c),
+		Styles:      ratedRows(styleRows(c)),
+		Passions:    ratedRows(passionRows(c)),
+		Inventory:   inventoryItems(c),
+		Locations:   locationRows(c),
+		Conditions:  conditionLabels(c),
 	}
 	if c.Age > 0 {
 		s.Age = strconv.Itoa(c.Age)
@@ -125,14 +127,16 @@ func sheetFor(c *char.Character) tui.Sheet {
 		{Name: "POW", Value: strconv.Itoa(ch.POW)},
 		{Name: "CHA", Value: strconv.Itoa(ch.CHA)},
 	}
-	if max := c.Derived.HitPoints; max > 0 {
-		var current int
-		for _, hp := range c.CurrentHP {
-			current += hp
-		}
+	s.HPMax = c.Derived.HitPoints
+	for _, hp := range c.CurrentHP {
+		s.HPCurrent += hp
+	}
+	if s.HPMax > 0 {
 		s.Derived = append(s.Derived, tui.NameValue{
-			Name: "HP", Value: strconv.Itoa(current) + "/" + strconv.Itoa(max),
+			Name: "HP", Value: strconv.Itoa(s.HPCurrent) + "/" + strconv.Itoa(s.HPMax),
 		})
+	} else {
+		s.HPCurrent = 0 // no pooled HP to show: no bar either
 	}
 	s.Derived = append(s.Derived,
 		tui.NameValue{Name: "Damage Modifier", Value: c.Derived.DamageModifier},
@@ -141,6 +145,42 @@ func sheetFor(c *char.Character) tui.Sheet {
 		tui.NameValue{Name: "Experience Bonus", Value: strconv.Itoa(c.Derived.ExperienceModifier)},
 	)
 	return s
+}
+
+// skillSections names the skill categories the sheet sections by, in
+// display order; "Other" catches skills the catalogue does not name (a
+// GM-granted custom skill).
+var skillSections = []string{"Standard Skills", "Professional Skills", "Other"}
+
+// skillGroups sections the character's skills by the engine's catalogue —
+// char.IsStandard / char.IsProfessional (tables.md §1.8/§1.9) — into the
+// sheet's titled blocks, each sorted by the shared value-descending order.
+// A skill in neither list lands in "Other"; empty sections are dropped.
+func skillGroups(c *char.Character) []tui.SheetGroup {
+	buckets := map[string][]rated{
+		"Standard Skills":     nil,
+		"Professional Skills": nil,
+		"Other":               nil,
+	}
+	for _, r := range skillMapRows(c) {
+		switch {
+		case char.IsStandard(r.name):
+			buckets["Standard Skills"] = append(buckets["Standard Skills"], r)
+		case char.IsProfessional(r.name):
+			buckets["Professional Skills"] = append(buckets["Professional Skills"], r)
+		default:
+			buckets["Other"] = append(buckets["Other"], r)
+		}
+	}
+	groups := make([]tui.SheetGroup, 0, len(skillSections))
+	for _, name := range skillSections {
+		rows := ratedSorted(buckets[name])
+		if len(rows) == 0 {
+			continue
+		}
+		groups = append(groups, tui.SheetGroup{Name: name, Rows: ratedRows(rows)})
+	}
+	return groups
 }
 
 // rated is one mapped sheet row before its final ordering.
@@ -255,8 +295,9 @@ func severityLabel(c *char.Character, location string) string {
 	}
 }
 
-// inventoryLines renders the carried items tersely: name, quantity when it
-// is not one, and the equip slot when wielded or worn.
+// inventoryLines renders the carried items tersely for the metadata panel:
+// name, quantity when it is not one, and the equip slot when wielded or
+// worn.
 func inventoryLines(c *char.Character) []string {
 	lines := make([]string, 0, len(c.Inventory))
 	for _, item := range c.Inventory {
@@ -277,6 +318,25 @@ func inventoryLines(c *char.Character) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// inventoryItems projects the carried items onto the sheet's inventory
+// table (quantity, item, equip marker), in the engine's order — the table
+// shows what the panel lists, one column per field.
+func inventoryItems(c *char.Character) []tui.InventoryItem {
+	items := make([]tui.InventoryItem, 0, len(c.Inventory))
+	for _, item := range c.Inventory {
+		if item == nil {
+			continue
+		}
+		items = append(items, tui.InventoryItem{
+			Name:     item.Name,
+			Qty:      item.Qty,
+			Equipped: item.Equipped,
+			Slot:     item.Slot,
+		})
+	}
+	return items
 }
 
 // sceneLine renders the scene as one sentence: the location, with the GM's

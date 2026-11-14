@@ -118,6 +118,14 @@ type Config struct {
 	// HistoryWindow is how many conversation messages compaction keeps
 	// verbatim; zero or negative means defaultHistoryWindow.
 	HistoryWindow int
+	// ReplayTools replays the recorded tool annotations from log.jsonl
+	// on Resume, before their dice (config ui.replay_tools). Replayed
+	// dice always come back either way; this only adds the ⚙ strips.
+	ReplayTools bool
+	// ContextWindow is the model's context window in tokens for the
+	// footer's context readout (config llm.context_window); zero means
+	// unknown, so the footer shows tokens without a percentage.
+	ContextWindow int
 }
 
 // validate rejects a Config that could not produce a working session.
@@ -146,23 +154,25 @@ func (cfg Config) build(st *resolve.State) *Session {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
-		state:       st,
-		store:       cfg.Store,
-		client:      cfg.Client,
-		registry:    cfg.Registry,
-		decision:    cfg.Decide,
-		overrides:   cfg.Overrides,
-		sessionsDir: cfg.SessionsDir,
-		autosave:    cfg.Autosave,
-		window:      window,
-		maxRounds:   rounds,
-		model:       cfg.ModelName,
-		events:      make(chan tui.Event, eventBuffer),
-		inputs:      make(chan input, inputQueue),
-		ctx:         ctx,
-		cancel:      cancel,
-		quit:        make(chan struct{}),
-		done:        make(chan struct{}),
+		state:         st,
+		store:         cfg.Store,
+		client:        cfg.Client,
+		registry:      cfg.Registry,
+		decision:      cfg.Decide,
+		overrides:     cfg.Overrides,
+		sessionsDir:   cfg.SessionsDir,
+		autosave:      cfg.Autosave,
+		window:        window,
+		maxRounds:     rounds,
+		model:         cfg.ModelName,
+		replayTools:   cfg.ReplayTools,
+		contextWindow: cfg.ContextWindow,
+		events:        make(chan tui.Event, eventBuffer),
+		inputs:        make(chan input, inputQueue),
+		ctx:           ctx,
+		cancel:        cancel,
+		quit:          make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	s.loadChannel()
 	return s
@@ -213,6 +223,17 @@ type Session struct {
 	maxRounds int
 	// model labels the language model in metadata (/meta).
 	model string
+	// replayTools replays recorded tool annotations on Resume (config
+	// ui.replay_tools); replayed dice always come back.
+	replayTools bool
+	// contextWindow is the model's context window in tokens (config
+	// llm.context_window, else the embedded catalog); 0 = unknown. Set
+	// once at construction, so Metadata reads it without locking.
+	contextWindow int
+	// contextTokens is the input-token count of the last model call that
+	// reported usage — the context size the footer shows. Written only by
+	// the runner, read by Metadata under mu.
+	contextTokens int
 
 	// chanMu guards lastChannel: the TUI goroutine writes it through
 	// SetChannel (and Send) while the command layer and tests read it.
@@ -372,6 +393,21 @@ func (s *Session) save() error {
 		return fmt.Errorf("session: save: %w", err)
 	}
 	return nil
+}
+
+// noteUsage remembers the input tokens of the model call that just
+// finished — the context size the footer's readout shows. Usage is
+// advisory display data, never a compaction input (the window still
+// counts messages), and a call that reports none keeps the last known
+// figure instead of blanking the footer. Runner goroutine only; read by
+// Metadata under mu.
+func (s *Session) noteUsage(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.contextTokens = tokens
+	s.mu.Unlock()
 }
 
 // record appends one dispatch to log.jsonl: the model's call verbatim (id,
