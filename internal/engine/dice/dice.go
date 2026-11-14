@@ -30,6 +30,10 @@ import (
 type Rand struct {
 	seed int64
 	src  *rand.Rand
+	// pcg is the generator src draws from. It is retained so MarshalBinary
+	// can capture the live stream position: math/rand/v2's *Rand itself has
+	// no binary form, its *PCG source does (see marshal.go).
+	pcg *rand.PCG
 }
 
 // NewRand returns a Rand that is fully determined by seed. The same seed
@@ -38,9 +42,11 @@ type Rand struct {
 func NewRand(seed int64) *Rand {
 	// The two PCG seeds are derived from the caller's seed so adjacent seeds
 	// produce independent streams; PCG accepts any pair of uint64 values.
+	pcg := rand.NewPCG(uint64(seed), uint64(seed)+1)
 	return &Rand{
 		seed: seed,
-		src:  rand.New(rand.NewPCG(uint64(seed), uint64(seed)+1)),
+		src:  rand.New(pcg),
+		pcg:  pcg,
 	}
 }
 
