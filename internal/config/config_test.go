@@ -16,6 +16,7 @@ import (
 // an empty variable as unset).
 var scalarEnvKeys = []string{
 	"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
+	"MYUL_LLM_HEADERS",
 	"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
 	"MYUL_GAME_SEED", "MYUL_GAME_AUTOSAVE",
 	"MYUL_UI_THEME", "MYUL_UI_DICE_ANIMATION", "MYUL_UI_METADATA_DEFAULT", "MYUL_UI_COLOUR_MODE",
@@ -32,7 +33,7 @@ func blankEnv(t *testing.T) {
 func TestDefaultConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 
-	if cfg.LLM != (config.LLMConfig{}) {
+	if !reflect.DeepEqual(cfg.LLM, config.LLMConfig{}) {
 		t.Errorf("llm defaults = %+v, want zero values (must be set by the user)", cfg.LLM)
 	}
 	if !cfg.Decision.Enabled {

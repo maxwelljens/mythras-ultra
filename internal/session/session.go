@@ -67,6 +67,12 @@ type Config struct {
 	// ignored by [Resume], whose stream continues from the persisted
 	// RNGState.
 	Seed int64
+	// State, when non-nil, is a pre-built game state for [New] instead
+	// of one minted from Name/Seed. The command layer mints it before
+	// the model client so the client can carry the state's id as its
+	// provider session id ([llm.Config.SessionID]); nil keeps [New]'s
+	// own minting. [Resume] ignores it (it loads the persisted state).
+	State *resolve.State
 	// ModelName labels the language model in metadata and the TUI header,
 	// usually "provider/model".
 	ModelName string
@@ -183,14 +189,18 @@ type Session struct {
 	closed atomic.Bool
 }
 
-// New starts a fresh session: it builds state via [resolve.NewState],
+// New starts a fresh session: it adopts [Config.State] when the command
+// layer pre-built one, otherwise builds state via [resolve.NewState],
 // persists it (state.json plus the opening log.jsonl entry), and starts the
 // runner goroutine. The caller owns the returned session and must Close it.
 func New(cfg Config) (*Session, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	st := resolve.NewState(cfg.Name, cfg.Seed)
+	st := cfg.State
+	if st == nil {
+		st = resolve.NewState(cfg.Name, cfg.Seed)
+	}
 	s := cfg.build(st)
 	if err := s.store.Save(st); err != nil {
 		s.cancel()

@@ -48,8 +48,15 @@ type LLMConfig struct {
 	// APIKeyEnv names the environment variable holding the API key;
 	// the key itself never lives in the config file.
 	APIKeyEnv string `mapstructure:"api_key_env"`
-	// BaseURL optionally overrides the provider's endpoint.
+	// BaseURL optionally overrides the provider's endpoint — a base URL
+	// ("…/v1") or the full endpoint ("…/v1/chat/completions"); the
+	// endpoint suffix is normalised away by the LLM client.
 	BaseURL string `mapstructure:"base_url"`
+	// Headers are extra static request headers sent with every model
+	// request ([llm.headers] in TOML), e.g. provider-specific routing
+	// headers. myul also sends x-opencode-session automatically — see
+	// the config template.
+	Headers map[string]string `mapstructure:"headers"`
 }
 
 // DecisionConfig is the [decision] section: the optional tev1/Ollama
@@ -169,9 +176,9 @@ func (c *Config) Validate() error {
 // the environment for keys it already knows, and AllKeys (hence
 // Unmarshal) is built from defaults, config file and flags. The values
 // must match [DefaultConfig]; TestLoadDefaults enforces that.
-// The two map sections ([game.house_rules], [prompts]) are omitted on
-// purpose: Viper flattens map defaults into individual keys, so an
-// empty map default would register nothing.
+// The map sections ([llm.headers], [game.house_rules], [prompts]) are
+// omitted on purpose: Viper flattens map defaults into individual keys,
+// so an empty map default would register nothing.
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.provider", "")
 	v.SetDefault("llm.model", "")

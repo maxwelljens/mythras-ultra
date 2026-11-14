@@ -47,11 +47,27 @@ type Config struct {
 	// native "openaicompat", whose local servers usually need none.
 	// Missing required keys fail with [ErrNoAPIKey].
 	APIKey string
-	// BaseURL overrides the provider endpoint — explicit config always
-	// wins over the catalog's endpoint. Honoured by "openai",
-	// "anthropic" and "openaicompat"; "openrouter" exposes no base-URL
-	// option and rejects a non-empty value instead of ignoring it.
+	// BaseURL is the provider base URL; full endpoint URLs like
+	// `.../v1/chat/completions` are accepted and normalised
+	// ([NormalizeBaseURL]). Explicit config always wins over the
+	// catalog's endpoint. Honoured by "openai", "anthropic" and
+	// "openaicompat"; "openrouter" exposes no base-URL option and
+	// rejects a non-empty value instead of ignoring it.
 	BaseURL string
+	// SessionID is sent as the x-opencode-session header on every
+	// request when non-empty: OpenCode's inference gateway needs a
+	// stable per-conversation id for routing and prompt caching, and
+	// other providers ignore the extra header. The command layer
+	// derives it from the session's state id so it survives restarts.
+	SessionID string
+	// Headers are extra static request headers from the config's
+	// [llm.headers] table, applied to every request. A configured
+	// x-opencode-session value is overridden by [Config.SessionID].
+	Headers map[string]string
+	// UserAgent identifies myul to the provider (e.g. "myul/v1.2.3")
+	// instead of the SDK's generic User-Agent; empty keeps the
+	// adapter's default.
+	UserAgent string
 }
 
 // FantasyClient is the production [Client], backed by charm.land/fantasy.
@@ -108,6 +124,10 @@ type providerTarget struct {
 	needsKey bool
 }
 
+// sessionHeader is the per-conversation routing header OpenCode's
+// inference gateway requires; harmless on providers that ignore it.
+const sessionHeader = "x-opencode-session"
+
 // newProvider constructs the fantasy provider package for cfg.
 func newProvider(cfg Config) (fantasy.Provider, error) {
 	target, err := resolveTarget(cfg)
@@ -120,11 +140,27 @@ func newProvider(cfg Config) (fantasy.Provider, error) {
 			return nil, err
 		}
 	}
+	// Static config headers first, then the session id on top: the
+	// routing header is plumbing, so it wins over a same-named entry
+	// in [llm.headers].
+	headers := make(map[string]string, len(cfg.Headers)+1)
+	for k, v := range cfg.Headers {
+		headers[k] = v
+	}
+	if cfg.SessionID != "" {
+		headers[sessionHeader] = cfg.SessionID
+	}
 	switch target.adapter {
 	case "openai":
 		opts := []openai.Option{openai.WithAPIKey(cfg.APIKey)}
 		if target.baseURL != "" {
 			opts = append(opts, openai.WithBaseURL(target.baseURL))
+		}
+		if len(headers) > 0 {
+			opts = append(opts, openai.WithHeaders(headers))
+		}
+		if cfg.UserAgent != "" {
+			opts = append(opts, openai.WithUserAgent(cfg.UserAgent))
 		}
 		provider, err := openai.New(opts...)
 		return wrapProvider(providerName, provider, err)
@@ -133,13 +169,26 @@ func newProvider(cfg Config) (fantasy.Provider, error) {
 		if target.baseURL != "" {
 			opts = append(opts, anthropic.WithBaseURL(target.baseURL))
 		}
+		if len(headers) > 0 {
+			opts = append(opts, anthropic.WithHeaders(headers))
+		}
+		if cfg.UserAgent != "" {
+			opts = append(opts, anthropic.WithUserAgent(cfg.UserAgent))
+		}
 		provider, err := anthropic.New(opts...)
 		return wrapProvider(providerName, provider, err)
 	case "openrouter":
 		if target.baseURL != "" {
 			return nil, fmt.Errorf("llm: provider %q does not support a custom base URL", providerName)
 		}
-		provider, err := openrouter.New(openrouter.WithAPIKey(cfg.APIKey))
+		opts := []openrouter.Option{openrouter.WithAPIKey(cfg.APIKey)}
+		if len(headers) > 0 {
+			opts = append(opts, openrouter.WithHeaders(headers))
+		}
+		if cfg.UserAgent != "" {
+			opts = append(opts, openrouter.WithUserAgent(cfg.UserAgent))
+		}
+		provider, err := openrouter.New(opts...)
 		return wrapProvider(providerName, provider, err)
 	case "openaicompat":
 		// The OpenAI-compatible path targets arbitrary servers (including
@@ -150,6 +199,12 @@ func newProvider(cfg Config) (fantasy.Provider, error) {
 		}
 		if target.baseURL != "" {
 			opts = append(opts, openaicompat.WithBaseURL(target.baseURL))
+		}
+		if len(headers) > 0 {
+			opts = append(opts, openaicompat.WithHeaders(headers))
+		}
+		if cfg.UserAgent != "" {
+			opts = append(opts, openaicompat.WithUserAgent(cfg.UserAgent))
 		}
 		provider, err := openaicompat.New(opts...)
 		return wrapProvider(providerName, provider, err)
@@ -174,11 +229,12 @@ func newProvider(cfg Config) (fantasy.Provider, error) {
 // misconfiguration.
 func resolveTarget(cfg Config) (providerTarget, error) {
 	name := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	baseURL := NormalizeBaseURL(cfg.BaseURL)
 	switch name {
 	case "openai", "anthropic", "openrouter":
-		return providerTarget{adapter: name, baseURL: cfg.BaseURL, needsKey: true}, nil
+		return providerTarget{adapter: name, baseURL: baseURL, needsKey: true}, nil
 	case "openaicompat":
-		return providerTarget{adapter: name, baseURL: cfg.BaseURL}, nil
+		return providerTarget{adapter: name, baseURL: baseURL}, nil
 	}
 	info, err := ResolveProvider(name)
 	if err != nil {
@@ -198,9 +254,8 @@ func resolveTarget(cfg Config) (providerTarget, error) {
 			info.Name, info.ID, info.Type, catwalk.TypeCompletions, catwalk.TypeMessages)
 	}
 	// Endpoint precedence: explicit config > the catalog's API endpoint.
-	baseURL := cfg.BaseURL
 	if baseURL == "" {
-		baseURL = info.BaseURL
+		baseURL = NormalizeBaseURL(info.BaseURL)
 	}
 	if !isHTTPURL(baseURL) {
 		return providerTarget{}, fmt.Errorf(
@@ -220,6 +275,45 @@ func resolveTarget(cfg Config) (providerTarget, error) {
 func isHTTPURL(s string) bool {
 	u, err := url.Parse(s)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// endpointSuffixes are the path endings the SDKs append to a base URL:
+// openai-go appends "chat/completions", the Anthropic SDK "v1/messages"
+// (with "/messages" as the shorter form some proxies document). Checked
+// longest first so "/v1/messages" is not cut down to "/v1".
+var endpointSuffixes = []string{"/chat/completions", "/v1/messages", "/messages"}
+
+// NormalizeBaseURL accepts both documented forms of a provider endpoint:
+// the base ("…/v1") and the full endpoint ("…/v1/chat/completions" or the
+// anthropic-style "…/v1/messages"), which the SDKs would otherwise double
+// by appending their own path to it. A recognised endpoint suffix is
+// stripped and trailing slashes are trimmed; every other URL (including
+// unresolved "$ENV" placeholders and non-URLs) is returned unchanged.
+//
+// It is exported because `myul doctor` probes "<base>/models" and must
+// derive the same base the client will use.
+func NormalizeBaseURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return s // not an absolute URL (e.g. an unresolved "$ENV" placeholder)
+	}
+	path := strings.TrimRight(u.Path, "/")
+	for _, suffix := range endpointSuffixes {
+		if strings.HasSuffix(path, suffix) {
+			path = strings.TrimSuffix(path, suffix)
+			break
+		}
+	}
+	if path == u.Path {
+		return s // nothing to change: keep the URL byte-for-byte
+	}
+	u.Path = path
+	u.RawPath = ""
+	return u.String()
 }
 
 // requireAPIKey fails with [ErrNoAPIKey] when a provider that needs a
