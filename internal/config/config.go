@@ -38,8 +38,8 @@ type Config struct {
 }
 
 // LLMConfig is the [llm] section. Every field defaults to the empty
-// string and must be set by the user before a session can reach a
-// provider.
+// string (or zero) and must be set by the user before a session can reach
+// a provider — except ContextWindow, which the catalog can supply.
 type LLMConfig struct {
 	// Provider selects the provider adapter.
 	Provider string `mapstructure:"provider"`
@@ -57,6 +57,11 @@ type LLMConfig struct {
 	// headers. myul also sends x-opencode-session automatically — see
 	// the config template.
 	Headers map[string]string `mapstructure:"headers"`
+	// ContextWindow is the model's context window in tokens for the
+	// footer's context readout; 0 (the default) means "unknown". The
+	// embedded catalog usually supplies it for the configured model —
+	// this is the fallback for custom or stale-catalog models.
+	ContextWindow int `mapstructure:"context_window"`
 }
 
 // DecisionConfig is the [decision] section: the optional tev1/Ollama
@@ -98,6 +103,10 @@ type UIConfig struct {
 	DiceAnimation bool `mapstructure:"dice_animation"`
 	// MetadataDefault shows the right-hand metadata panel at start-up.
 	MetadataDefault bool `mapstructure:"metadata_default"`
+	// ReplayTools replays the recorded tool annotations from log.jsonl
+	// on resume; replayed dice always come back either way (dice always
+	// replay). Off by default: the annotation strips are transient.
+	ReplayTools bool `mapstructure:"replay_tools"`
 	// ColourMode is one of [ColourModeAdaptive], [ColourMode16] or
 	// [ColourModeTerminal].
 	ColourMode string `mapstructure:"colour_mode"`
@@ -194,6 +203,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.model", "")
 	v.SetDefault("llm.api_key_env", "")
 	v.SetDefault("llm.base_url", "")
+	v.SetDefault("llm.context_window", 0)
 	v.SetDefault("decision.enabled", true)
 	v.SetDefault("decision.url", "http://localhost:11434")
 	v.SetDefault("decision.model", "tev1:4b")
@@ -203,5 +213,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ui.theme", "mythras")
 	v.SetDefault("ui.dice_animation", true)
 	v.SetDefault("ui.metadata_default", false)
+	v.SetDefault("ui.replay_tools", false)
 	v.SetDefault("ui.colour_mode", ColourModeAdaptive)
 }

@@ -16,10 +16,11 @@ import (
 // an empty variable as unset).
 var scalarEnvKeys = []string{
 	"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
-	"MYUL_LLM_HEADERS",
+	"MYUL_LLM_CONTEXT_WINDOW", "MYUL_LLM_HEADERS",
 	"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
 	"MYUL_GAME_SEED", "MYUL_GAME_AUTOSAVE", "MYUL_GAME_MAX_TOOL_ROUNDS",
-	"MYUL_UI_THEME", "MYUL_UI_DICE_ANIMATION", "MYUL_UI_METADATA_DEFAULT", "MYUL_UI_COLOUR_MODE",
+	"MYUL_UI_THEME", "MYUL_UI_DICE_ANIMATION", "MYUL_UI_METADATA_DEFAULT",
+	"MYUL_UI_REPLAY_TOOLS", "MYUL_UI_COLOUR_MODE",
 }
 
 // blankEnv clears the MYUL_* scalar keys for the duration of t.
@@ -66,6 +67,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.UI.MetadataDefault {
 		t.Error("ui.metadata_default default = true, want false")
 	}
+	if cfg.UI.ReplayTools {
+		t.Error("ui.replay_tools default = true, want false (dice still replay)")
+	}
+	if cfg.LLM.ContextWindow != 0 {
+		t.Errorf("llm.context_window default = %d, want 0 (unknown — the catalog supplies it)", cfg.LLM.ContextWindow)
+	}
 	if want := config.ColourModeAdaptive; cfg.UI.ColourMode != want {
 		t.Errorf("ui.colour_mode default = %q, want %q", cfg.UI.ColourMode, want)
 	}
@@ -93,6 +100,7 @@ provider = "fantasy"
 model = "gpt-x"
 api_key_env = "PROVIDER_KEY"
 base_url = "https://api.example/v1"
+context_window = 128000
 
 [decision]
 enabled = false
@@ -107,6 +115,7 @@ crit_fumble = true
 theme = "obsidian"
 dice_animation = false
 metadata_default = true
+replay_tools = true
 colour_mode = "terminal"
 
 [prompts]
@@ -115,10 +124,11 @@ persona = "/tmp/persona.md"
 			want: func() *config.Config {
 				want := config.DefaultConfig()
 				want.LLM = config.LLMConfig{
-					Provider:  "fantasy",
-					Model:     "gpt-x",
-					APIKeyEnv: "PROVIDER_KEY",
-					BaseURL:   "https://api.example/v1",
+					Provider:      "fantasy",
+					Model:         "gpt-x",
+					APIKeyEnv:     "PROVIDER_KEY",
+					BaseURL:       "https://api.example/v1",
+					ContextWindow: 128000,
 				}
 				want.Decision.Enabled = false
 				want.Game.Seed = 42
@@ -128,6 +138,7 @@ persona = "/tmp/persona.md"
 					Theme:           "obsidian",
 					DiceAnimation:   false,
 					MetadataDefault: true,
+					ReplayTools:     true,
 					ColourMode:      config.ColourModeTerminal,
 				}
 				want.Prompts = map[string]string{"persona": "/tmp/persona.md"}
