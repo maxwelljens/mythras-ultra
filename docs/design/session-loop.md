@@ -14,7 +14,7 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
 - `Send(ctx, channel, text)` — player input (IC or OOC).
 - `Events() <-chan Event` — one stable channel, closed by `Close()`.
 - `Metadata() tui.Metadata` — snapshot for the panel (from `resolve.State`).
-- `Close()` — flush state + log, close channel.
+- `Close()` — final save, write `transcript.md`, close the channel.
 
 ## Turn loop
 
@@ -24,7 +24,8 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
    b. Append to conversation as `RoleUser`. If a slash command (`/roll`,
       `/save`, `/recap`, `/meta`, ...) it is handled locally instead: `/roll`
       runs a `RollDice` move, `/save` saves, `/recap` returns the recap,
-      `/meta` toggles the panel.
+      `/meta` prints the panel snapshot (the panel itself toggles with
+      `ctrl+m`).
    c. Call `llm.Client.Chat` (or `Stream`) with: system prompt
       (prompts.Assemble: persona + recap + character/world summaries),
       conversation history, and the registry's `[]llm.ToolSpec`.
@@ -34,8 +35,9 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
    b. Emit `EventToolAnnotation` (tool name + Result.Summary, OK flag) and,
       for each `Audit.Rolls`, an `EventDice` (Expr/Dice/Modifier/Total/
       Outcome) so the dice theatre plays.
-   c. Append `RoleTool` messages, re-call the LLM. Bound the loop (e.g. 32
-      iterations) — on overflow, summarise and stop with an `EventError`.
+   c. Append `RoleTool` messages, re-call the LLM. Bound the loop (32
+      rounds, `maxToolRounds`) — on overflow, summarise and stop with an
+      `EventError`.
 3. Assistant text: stream as `EventNarrative` deltas; on completion append
    to history.
 4. OOC channel: same loop but tag the message `[ooc]`; the prompt instructs
@@ -48,17 +50,19 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
   edits `resolve.State` directly. After each accepted move: autosave
   (`config.game.autosave`) + `Store.Record`.
 - `decide` questions (advisory) are logged like tool calls with
-  `advisory: true`; the GM may be nudged to call the right tool when a
-  player action looks mechanical but no test was requested (soft policy —
-  log a note, never force).
+  `advisory: true`. Nothing forces a tool call: the prompt's tool policy asks
+  the GM to test consequential actions, and the loop never insists (soft
+  policy — the only enforced stop is the tool-round bound above).
 
 ## Context compaction
 
 Long games exceed context. Policy: system prompt carries `Recaps` (from
 `EndRecap` moves) + current character/world summaries; conversation history
-is windowed to the last N messages (config), older turns replaced by a
-rolling summary produced through the same `llm.Client` (or kept verbatim if
-the model context is large enough — decide by tokens from `Usage`).
+is windowed to the last `Config.HistoryWindow` messages (default 32), the
+older turns replaced by one summary produced through the same `llm.Client`.
+If that summarisation call fails, everything is kept verbatim and a note
+lands in the transcript — compaction is an optimisation, never a data loss.
+The window counts messages, not tokens (`Usage` is deliberately unused).
 
 ## Failure policy
 

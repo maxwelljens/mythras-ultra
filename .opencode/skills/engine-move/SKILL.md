@@ -26,14 +26,15 @@ API and the mock-session test surface (ARCHITECTURE.md §4.5, §3.1).
    return a sentinel error (e.g. `ErrNotEnoughAP`, `ErrNoEncounter`) wrapped
    with `%w` — never a panic, never a partial mutation.
 4. **Execute** by calling the subpackage functions with the explicit
-   `*State` and the session `*dice.Rand`. All randomness flows through
-   `engine/dice` with the seedable RNG (ARCHITECTURE.md §3.1) — no
+   `*State`; the session RNG is `State.Rand()` — a seedable `*dice.Rand`.
+   All randomness flows through `engine/dice` (ARCHITECTURE.md §3.1) — no
    `math/rand` use elsewhere, no coin flips in `resolve`.
 5. **Return a `Result`**: human summary, machine `Facts` (before/after
-   deltas the GM narrates from), the dice `Audit` entries (each roll with
-   expression, rolls, modifiers), and the rule reference where applicable
-   (e.g. `"Mythras Imperative, Combat §3.2"`). Applied modifiers must appear
-   in the audit ("+20 difficult, −10 darkness").
+   deltas the GM narrates from), and an `Audit` carrying the dice rolls
+   (expression, dice, modifier, total), rule citations where applicable
+   (e.g. `"Mythras Imperative, Skills: Modifying Skills"`), and
+   before → after `Changes`. The applied difficulty must be visible in the
+   facts ("45% base → 65% under very easy difficulty").
 6. **Wire into the state log**: accepted moves mutate state, then the caller
    path persists `state.json` atomically and appends to `log.jsonl`
    (ARCHITECTURE.md §5). Do not bypass `resolve` from `harness` or `tui`.
@@ -41,32 +42,36 @@ API and the mock-session test surface (ARCHITECTURE.md §4.5, §3.1).
    `dice.NewRand(seed)`, asserting on `Result.Facts` and audit entries — not
    just error/success. Cover the happy path and each sentinel error.
 8. **If the move will be GM-facing**, pair it with a tool (see the
-   `harness-tool` skill) and a `testdata/mocksession/` turn.
+   `harness-tool` skill) and a scripted turn in
+   `internal/harness/testdata/mocksession/`.
 
-## Code shape (guidance, not gospel)
+## Code shape (the real shape — see `moves_combat.go`, `result.go`)
 
 ```go
-// internal/engine/resolve — names illustrative; follow existing moves.
+// internal/engine/resolve
 var ErrNotEnoughAP = errors.New("not enough action points")
 
-type SpendAPMove struct {
-    ActorID string
-    Cost    int
-    Reason  string
+// A move implements Move: Kind() + Apply(s *State).
+type SpendAP struct {
+    Actor  string // character ID
+    Action string // printed Combat Action name
 }
 
-func (m SpendAPMove) Execute(st *State, rnd *dice.Rand) (Result, error) {
-    // 1. validate → sentinel error (wrapped with %w), no mutation
-    // 2. execute via engine/combat (AP economy) using rnd
-    // 3. build Result{Summary, Facts []Fact, Audit []dice.AuditEntry, Rule}
-    // 4. mutate st only here; caller persists state.json + log.jsonl
+func (m SpendAP) Kind() string { return "spend_ap" }
+
+func (m SpendAP) Apply(s *State) (Result, error) {
+    // 1. validate against s → sentinel error (wrapped with %w), no mutation
+    // 2. execute via engine/combat, drawing dice from s.Rand()
+    // 3. mutate s only here; resolve.Apply restores the pre-move state
+    //    and RNG position on error — nothing partial ever escapes
+    // 4. the session then persists state.json + appends log.jsonl
+    ...
 }
 
 type Result struct {
-    Summary string        // human line for the GM/UI
-    Facts   []Fact        // machine before/after deltas
-    Audit   []dice.AuditEntry
-    Rule    string        // "Mythras Imperative, <section>"
+    Summary string   // human line for the GM/UI
+    Facts   []string // authoritative before/after facts
+    Audit   *Audit   // Rolls, Citations, Changes; nil when empty
 }
 ```
 

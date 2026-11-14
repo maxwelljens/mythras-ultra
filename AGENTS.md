@@ -14,10 +14,12 @@ coding agents. Read `docs/ARCHITECTURE.md` first — it is the design contract.
    inputs, documented exported symbols.
 3. **Test what matters.** Every engine package gets unit tests with seeded
    RNG. Every harness tool must be exercised by the mock session
-   (`testdata/mocksession/`). `go test ./...` passes offline.
+   (`internal/harness/testdata/mocksession/`). `go test ./...` passes offline.
 4. **Layering** (enforced by review): `engine/*` imports stdlib (+ tiny
    deps) only. `state`, `codex` → `engine`. `harness`, `tui` → everything
-   below. Never import `tui`/`harness`/`cmd` from `engine`.
+   below (they never import each other). `session` is the composition root:
+   it imports `tui`, `harness`, `state` and the engine. Never import
+   `tui`/`harness`/`session`/`cmd` from `engine`, `state` or `codex`.
 5. **Rulebook fidelity.** `Mythras-Imperative.md` is the source of truth;
    `docs/rules/digest.md` and `docs/rules/tables.md` are its
    implementation-ready mirror. If code and digest disagree, one of them is
@@ -38,13 +40,17 @@ See `docs/ARCHITECTURE.md` §2. Quick orientation:
 
 - `internal/engine/resolve` — the single mutation entry point (`Move`s).
 - `internal/harness/tools` — GM tool registry; add tools here, schema + handler.
+- `internal/session` — the turn loop (turn, compaction, driver); implements
+  `tui.Driver`, the only place LLM, harness, engine and TUI meet.
 - `internal/state` — persistence (`Store` interface, JSON store).
 - `internal/codex` — embedded rulebook + lookup.
 - `internal/tui` — Bubbletea models; one concern per file.
+- `cmd/myul` — cobra CLI: picker, `new`, `resume`, `sessions`, `delete`,
+  `export`, `config`, `doctor`, `version`.
 
 ## Style
 
-- Go 1.27, standard library first. Follow `golangci.yml` (errcheck, govet,
+- Go 1.27, standard library first. Follow `.golangci.yml` (errcheck, govet,
   staticcheck, gocritic, errorlint, ...). Run the linter before finishing.
 - Tables for game data: numeric rule tables live as Go data in `engine/rules`
   or `engine/combat`, transcribed from `docs/rules/tables.md`, with a comment
@@ -58,10 +64,13 @@ See `docs/ARCHITECTURE.md` §2. Quick orientation:
 
 - Table-driven tests; fixed `dice.NewRand(seed)`; assert on `Result.Facts` and
   audit, not just error/success.
-- Golden files under `testdata/` — regenerate with `go test ./... -update`.
+- Expectations are pinned inline in the tests (e.g. `TestSearchGolden`,
+  `TestAssembleDefaultPrompt`); there are no golden files and no `-update`
+  flag — edit the expectations with the code.
 - Mock session: `llm.ScriptedClient` replays canned GM turns
-  (`testdata/mocksession/script.json`); assert the final in-memory state and
-  that every registered tool was exercised (the coverage rule).
+  (`internal/harness/testdata/mocksession/script.json`); assert the final
+  in-memory state and that every registered tool was exercised (the coverage
+  rule).
 
 ## Commits
 
