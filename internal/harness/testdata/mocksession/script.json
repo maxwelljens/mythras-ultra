@@ -1,0 +1,320 @@
+{
+  "seed": 42,
+  "turns": [
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "The salt wind combs the grass flat along the trade road. Two weeks ago the baron's riders burned the western tollhouse, and every caravan since has travelled under armed guard. What do you do?"
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Let's get your character onto the table. I'll roll the sheets for both of you.",
+          "tool_calls": [
+            {
+              "id": "t1",
+              "name": "create_character",
+              "args": { "name": "Wren Ashdown", "pc": true, "culture": "Civilised", "career": "Hunter", "age": 26, "skills": { "Unarmed": 95, "Perception": 65 } }
+            },
+            {
+              "id": "t2",
+              "name": "create_character",
+              "args": { "name": "Grimjaw", "pc": false, "culture": "Barbarian", "career": "Bounty Hunter", "skills": { "Evade": 15 } }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Both sheets are built. Now equipment, passions and the details that make Wren a person rather than a statistic.",
+          "tool_calls": [
+            {
+              "id": "t3",
+              "name": "finalize_character",
+              "args": {
+                "actor": "pc-1",
+                "equipment": [ { "name": "Broadsword" }, { "name": "Bow" } ],
+                "passions": [ { "name": "Hate (Orcs)", "kind": "race", "order": 1 } ]
+              }
+            },
+            {
+              "id": "t4",
+              "name": "finalize_character",
+              "args": { "actor": "npc-1", "equipment": [ { "name": "Club" } ] }
+            },
+            {
+              "id": "t5",
+              "name": "update_character",
+              "args": {
+                "actor": "pc-1",
+                "changes": {
+                  "concept": "A cartographer who trusts maps more than people.",
+                  "appearance": "Weather-stained coat, ink-black fingers, a surveyor's glass on a chain.",
+                  "notes": "Owes the ferryman a favour she has not yet named."
+                }
+              }
+            },
+            {
+              "id": "t6",
+              "name": "get_character",
+              "args": { "actor": "pc-1" }
+            },
+            {
+              "id": "t7",
+              "name": "list_characters",
+              "args": { "filter": "pc" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "The road climbs towards the wayside shrine. Before anyone speaks, let me ground the rules I am about to use.",
+          "tool_calls": [
+            {
+              "id": "t8",
+              "name": "rules_lookup",
+              "args": { "query": "opposed rolls differential", "limit": 3 }
+            },
+            {
+              "id": "t9",
+              "name": "rules_section",
+              "args": { "doc": "Mythras-Imperative.md", "heading": "Dice Used" }
+            },
+            {
+              "id": "t10",
+              "name": "set_scene",
+              "args": {
+                "location": "Wayside shrine on the Salt Roads",
+                "description": "A roofless stone shrine to a forgotten ferry-god, wind-scoured grass around it, the road a pale ribbon below.",
+                "present": [ "pc-1", "npc-1" ]
+              }
+            },
+            {
+              "id": "t11",
+              "name": "skill_test",
+              "args": { "actor": "pc-1", "skill": "Perception", "grade": "hard" }
+            },
+            {
+              "id": "t12",
+              "name": "roll_dice",
+              "args": { "expr": "2d6+3", "reason": "how many days of rations remain" }
+            },
+            {
+              "id": "t13",
+              "name": "note",
+              "args": { "topic": "clues", "text": "The ferryman's boat is hidden upstream of the shrine; he will not admit it cold.", "tags": [ "salt roads", "ferryman" ] }
+            },
+            {
+              "id": "t14",
+              "name": "world_get",
+              "args": {}
+            },
+            {
+              "id": "t15",
+              "name": "can_acquire",
+              "args": { "item": "Broadsword", "rarity": "rare" }
+            },
+            {
+              "id": "t16",
+              "name": "world_set_flag",
+              "args": { "key": "economy", "value": "strained", "reason": "the baron's blockade closes the salt road" }
+            },
+            {
+              "id": "t17",
+              "name": "add_clock",
+              "args": { "name": "unrest", "segments": 6, "on_complete": [ "the mob storms the granary" ] }
+            },
+            {
+              "id": "t18",
+              "name": "advance_clock",
+              "args": { "clock": "unrest", "segments": 2, "reason": "blockade rumours spread through the roadside villages" }
+            },
+            {
+              "id": "t19",
+              "name": "advance_time",
+              "args": { "days": 3, "hours": 6 }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Grimjaw steps out from behind the shrine with his club already in his hand. Initiative is rolled — the fight is on.",
+          "tool_calls": [
+            {
+              "id": "t20",
+              "name": "combat_start",
+              "args": { "participants": [ "pc-1", "npc-1" ] }
+            },
+            {
+              "id": "t21",
+              "name": "can_act",
+              "args": { "actor": "pc-1", "action": "Attack" }
+            },
+            {
+              "id": "t22",
+              "name": "spend_ap",
+              "args": { "actor": "pc-1", "action": "Move" }
+            },
+            {
+              "id": "t23",
+              "name": "combat_status",
+              "args": {}
+            },
+            {
+              "id": "t24",
+              "name": "next_round",
+              "args": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Round two: Wren closes the distance and swings for the bounty hunter's head.",
+          "tool_calls": [
+            {
+              "id": "t25",
+              "name": "resolve_attack",
+              "args": { "attacker": "pc-1", "weapon": "Broadsword", "defender": "npc-1", "reaction": "dodge" }
+            },
+            {
+              "id": "t26",
+              "name": "apply_special_effect",
+              "args": { "effect": "Impale", "attacker": "pc-1", "defender": "npc-1" }
+            },
+            {
+              "id": "t27",
+              "name": "apply_damage",
+              "args": { "actor": "npc-1", "amount": 4 }
+            },
+            {
+              "id": "t28",
+              "name": "heal",
+              "args": { "actor": "npc-1", "method": "first aid" }
+            },
+            {
+              "id": "t29",
+              "name": "combat_end",
+              "args": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Grimjaw breaks off and melts into the grass. The road is quiet again — time to take stock of what you carry.",
+          "tool_calls": [
+            {
+              "id": "t30",
+              "name": "inventory_add",
+              "args": { "actor": "pc-1", "item": "arrows", "qty": 10, "tags": [ "ammunition" ] }
+            },
+            {
+              "id": "t31",
+              "name": "inventory_remove",
+              "args": { "actor": "pc-1", "item": "arrows", "qty": 3 }
+            },
+            {
+              "id": "t32",
+              "name": "equip",
+              "args": { "actor": "pc-1", "item": "Broadsword", "slot": "main" }
+            },
+            {
+              "id": "t33",
+              "name": "check_encumbrance",
+              "args": { "actor": "pc-1" }
+            },
+            {
+              "id": "t34",
+              "name": "luck_point",
+              "args": { "actor": "pc-1", "purpose": "cheat fate" }
+            },
+            {
+              "id": "t35",
+              "name": "opposed_test",
+              "args": { "actor_a": "pc-1", "skill_a": "Stealth", "actor_b": "npc-1", "skill_b": "Stealth" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "The day's events settle into experience. One last judgement call for the decision layer before we wrap.",
+          "tool_calls": [
+            {
+              "id": "t36",
+              "name": "skill_advance",
+              "args": { "actor": "pc-1", "skill": "Perception" }
+            },
+            {
+              "id": "t37",
+              "name": "decide",
+              "args": {
+                "question": "Does Grimjaw's retreat call for an opposed test, a straight roll, or no roll at all?",
+                "options": [ "opposed test", "straight roll", "no roll" ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "That is where we leave the road for tonight. Let me store the recap so we pick up exactly here.",
+          "tool_calls": [
+            {
+              "id": "t38",
+              "name": "end_session_recap",
+              "args": { "summary": "Wren and Grimjaw clashed at the wayside shrine on the Salt Roads; the baron's blockade strained the economy, unrest is two segments from boiling over, and Grimjaw escaped north with the ferryman's secret." }
+            },
+            {
+              "id": "t39",
+              "name": "session_recap",
+              "args": {}
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "tools_used": [
+      "rules_lookup", "rules_section", "decide",
+      "roll_dice", "skill_test", "opposed_test", "luck_point",
+      "create_character", "finalize_character", "get_character",
+      "update_character", "list_characters", "skill_advance",
+      "inventory_add", "inventory_remove", "equip", "check_encumbrance",
+      "combat_start", "combat_status", "spend_ap", "can_act", "next_round",
+      "resolve_attack", "apply_special_effect", "apply_damage", "heal", "combat_end",
+      "world_get", "world_set_flag", "can_acquire", "add_clock", "advance_clock",
+      "advance_time", "set_scene", "note", "session_recap", "end_session_recap"
+    ],
+    "impossible": []
+  }
+}

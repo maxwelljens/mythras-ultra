@@ -1,0 +1,113 @@
+{
+  "seed": 7,
+  "turns": [
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "[ooc] Before we start: this campaign leans on intrigue and slow reveals rather than set-piece battles. Luck Points are spent through tools, never by fiat. Any questions before the first scene?"
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "One traveller on the road will do for now. And let me check the rules on Luck Points while I am at it — plus a quick consult of the decision layer.",
+          "tool_calls": [
+            {
+              "id": "o1",
+              "name": "create_character",
+              "args": { "name": "Sella Vane", "pc": true, "culture": "Civilised", "career": "Detective" }
+            },
+            {
+              "id": "o2",
+              "name": "decide",
+              "args": {
+                "question": "Does confronting the fence about the stolen brooch call for a skill test?",
+                "options": [ "Influence test", "no test", "Deceit test" ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "Sella squares up to the situation — and straight into a fight she did not plan for.",
+          "tool_calls": [
+            {
+              "id": "o3",
+              "name": "combat_start",
+              "args": { "participants": [ "pc-1" ] }
+            },
+            {
+              "id": "o4",
+              "name": "spend_ap",
+              "args": { "actor": "pc-1", "action": "Attack" }
+            },
+            {
+              "id": "o5",
+              "name": "spend_ap",
+              "args": { "actor": "pc-1", "action": "Move" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "She tries to press the attack a third time — the round will not allow it. And three more calls the engine should refuse.",
+          "tool_calls": [
+            {
+              "id": "o6",
+              "name": "spend_ap",
+              "args": { "actor": "pc-1", "action": "Attack" }
+            },
+            {
+              "id": "o7",
+              "name": "get_character",
+              "args": { "actor": "npc-99" }
+            },
+            {
+              "id": "o8",
+              "name": "skill_test",
+              "args": { "actor": "pc-1" }
+            },
+            {
+              "id": "o9",
+              "name": "add_clock",
+              "args": { "segments": 4 }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "response": {
+        "message": {
+          "role": "assistant",
+          "content": "[ooc] The rules on Luck Points are clear enough — one point per printed use, no stacking. We will resolve the fence conversation next session with the decision layer back online.",
+          "tool_calls": [
+            {
+              "id": "o10",
+              "name": "rules_lookup",
+              "args": { "query": "luck point spend", "limit": 2 }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expect": {
+    "tools_used": [
+      "create_character", "decide", "combat_start", "spend_ap",
+      "get_character", "skill_test", "add_clock", "rules_lookup"
+    ],
+    "impossible": [ "decide", "spend_ap", "get_character", "skill_test", "add_clock" ]
+  }
+}
