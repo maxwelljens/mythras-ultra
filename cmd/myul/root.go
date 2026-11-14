@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/mythras-ultra/myul/internal/config"
 	"github.com/mythras-ultra/myul/internal/harness/decide"
+	"github.com/mythras-ultra/myul/internal/harness/llm"
 	"github.com/mythras-ultra/myul/internal/state"
 )
 
@@ -170,14 +172,14 @@ func writeDefaultConfig(path string, force bool) error {
 	return nil
 }
 
-// newDoctorCmd validates the config, probes the LLM API key and probes the
-// decision model: the reachability probe below, then the real decide
-// client's model check. Probes report their findings but only config
-// errors fail the command.
+// newDoctorCmd validates the config, probes the LLM API key and endpoint
+// and probes the decision model: the reachability probes below, then the
+// real decide client's model check. Probes report their findings but only
+// config errors fail the command.
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Validate the config, probe the API key and the decision model",
+		Short: "Validate the config, probe the API key, the LLM endpoint and the decision model",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
@@ -190,6 +192,12 @@ func newDoctorCmd() *cobra.Command {
 				return err
 			}
 			if err := probeAPIKeyEnv(out, cfg); err != nil {
+				return err
+			}
+			if err := probeLLMEndpoint(cmd, out, cfg); err != nil {
+				return err
+			}
+			if err := noteLLMModel(out, cfg); err != nil {
 				return err
 			}
 			if !cfg.Decision.Enabled {
@@ -221,6 +229,157 @@ func probeAPIKeyEnv(out io.Writer, cfg *config.Config) error {
 		return err
 	}
 	_, err := fmt.Fprintf(out, "ok: $%s set\n", env)
+	return err
+}
+
+// probeLLMEndpoint sends one 2s HTTP GET to <base>/models with the
+// configured API key and [llm] headers, reporting ok / failed on out.
+// Like the other probes it never fails the command: doctor diagnoses, it
+// does not gate. On a non-2xx reply the provider's own error body is
+// surfaced verbatim when it parses (e.g. "failed: 401 api_key_expired —
+// This API key has expired…"), so an expired key reads as itself instead
+// of an opaque HTTP status. It is skipped — with a skipped: line — when
+// no endpoint or no API key is configured.
+func probeLLMEndpoint(cmd *cobra.Command, out io.Writer, cfg *config.Config) error {
+	base, info, ok := llmEndpoint(cfg.LLM)
+	if !ok {
+		_, err := fmt.Fprintln(out, "skipped: no LLM endpoint configured")
+		return err
+	}
+	key := ""
+	if env := effectiveAPIKeyEnv(cfg.LLM); env != "" {
+		if key = os.Getenv(env); key == "" {
+			_, err := fmt.Fprintf(out, "skipped: LLM endpoint probe ($%s unset)\n", env)
+			return err
+		}
+	}
+	endpoint := base + "/models"
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		_, ferr := fmt.Fprintf(out, "failed: LLM endpoint %q: %v\n", endpoint, err)
+		return ferr
+	}
+	for k, v := range cfg.LLM.Headers {
+		req.Header.Set(k, v)
+	}
+	if key != "" {
+		if info.Type == "messages" { // Anthropic-style endpoints authenticate with x-api-key.
+			req.Header.Set("x-api-key", key)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
+	req.Header.Set("User-Agent", "myul/"+version)
+	// Stable probe session id: gateways that route on x-opencode-session
+	// must not reject the probe before auth has even run.
+	req.Header.Set("x-opencode-session", "myul-doctor")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		_, ferr := fmt.Fprintf(out, "failed: LLM endpoint unreachable at %s: %v\n", endpoint, err)
+		return ferr
+	}
+	defer resp.Body.Close() //nolint:errcheck // discarded body; a close error cannot change reachability
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		_, err = fmt.Fprintf(out, "ok: LLM endpoint reachable at %s (HTTP %d)\n", endpoint, resp.StatusCode)
+		return err
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxLLMProbeBody))
+	if msg := llmErrorSummary(resp.StatusCode, body); msg != "" {
+		_, err = fmt.Fprintf(out, "failed: %s\n", msg)
+	} else {
+		_, err = fmt.Fprintf(out, "failed: LLM endpoint %s: HTTP %d\n", endpoint, resp.StatusCode)
+	}
+	return err
+}
+
+// maxLLMProbeBody bounds how much of a non-2xx reply the probe reads; an
+// error message lives in the first kilobytes.
+const maxLLMProbeBody = 64 << 10
+
+// llmEndpoint resolves the base URL the LLM probe should hit: the
+// configured base_url, else the embedded catalog endpoint for the
+// provider, normalised so a full endpoint URL ("…/v1/chat/completions")
+// probes the same base the client will use. ok is false when nothing
+// usable is configured (no provider/base_url, an unknown provider, or an
+// unresolved "$ENV" placeholder).
+func llmEndpoint(llmCfg config.LLMConfig) (string, llm.ProviderInfo, bool) {
+	var info llm.ProviderInfo
+	if llmCfg.Provider != "" {
+		if i, err := llm.ResolveProvider(llmCfg.Provider); err == nil {
+			info = i
+		}
+	}
+	base := strings.TrimSpace(llmCfg.BaseURL)
+	if base == "" {
+		base = info.BaseURL
+	}
+	base = llm.NormalizeBaseURL(base)
+	if base == "" || (!strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://")) {
+		return "", info, false
+	}
+	return base, info, true
+}
+
+// llmErrorSummary renders a provider error body as
+// "401 api_key_expired — message", understanding both the OpenAI shape
+// ({"error": {…}}) and the Anthropic/OpenCode shape
+// ({"type":"error","error":{…}}); the payload may also be a bare string.
+// It returns "" when the body is neither, so the caller falls back to a
+// plain status line.
+func llmErrorSummary(status int, body []byte) string {
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || len(env.Error) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(env.Error, &s); err == nil && s != "" {
+		return fmt.Sprintf("%d %s", status, s)
+	}
+	var obj struct {
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(env.Error, &obj); err != nil {
+		return ""
+	}
+	code := obj.Code
+	if code == "" {
+		code = obj.Type
+	}
+	switch {
+	case code != "" && obj.Message != "":
+		return fmt.Sprintf("%d %s — %s", status, code, obj.Message)
+	case obj.Message != "":
+		return fmt.Sprintf("%d %s", status, obj.Message)
+	case code != "":
+		return fmt.Sprintf("%d %s", status, code)
+	}
+	return ""
+}
+
+// noteLLMModel prints an advisory when the configured model is missing
+// from the embedded catalog for its provider: catalogs go stale and model
+// ids are free-form, so this never blocks anything — it is only a note.
+func noteLLMModel(out io.Writer, cfg *config.Config) error {
+	if cfg.LLM.Model == "" || cfg.LLM.Provider == "" {
+		return nil
+	}
+	info, err := llm.ResolveProvider(cfg.LLM.Provider)
+	if err != nil {
+		return nil // not a catalog provider (e.g. openaicompat): nothing to check
+	}
+	for _, m := range info.Models {
+		if m.ModelID == cfg.LLM.Model {
+			return nil
+		}
+	}
+	_, err = fmt.Fprintf(out, "note: model %q is not in the embedded catalog (may still work — catalogs can be stale)\n", cfg.LLM.Model)
 	return err
 }
 
@@ -290,14 +449,28 @@ model = ""
 # Name of the environment variable holding the API key — never the key
 # itself. Empty -> the catalog default for the provider above.
 api_key_env = ""
-# Optional endpoint override. Catalog providers carry their own endpoint;
-# for an arbitrary OpenAI-compatible server, pick the nearest catalog
-# provider (or "openaicompat", the arbitrary-server adapter) and point
-# base_url at it, e.g.:
+# Optional endpoint override. base_url accepts the provider base
+# (".../v1") or the full endpoint (".../v1/chat/completions") — the
+# endpoint suffix is stripped automatically. Catalog providers carry
+# their own endpoint; for an arbitrary OpenAI-compatible server, pick
+# the nearest catalog provider (or "openaicompat", the arbitrary-server
+# adapter) and point base_url at it, e.g.:
 #   provider = "openaicompat"
 #   base_url = "http://localhost:11434/v1"
 #   api_key_env = ""   # local servers usually need no key
+#
+# OpenCode Go (free tier), as documented by OpenCode:
+#   provider = "opencode-go"
+#   model = "beam-free"
+#   api_key_env = "OPENCODE_API_KEY"
+#   base_url = "https://opencode.ai/inference/go/openai/v1/chat/completions"
 base_url = ""
+# Extra static request headers sent with every model request:
+# [llm.headers]
+# x-custom-header = "value"
+# myul also sends x-opencode-session: <session id> on every request so
+# the provider can route and cache per conversation; the id is stable
+# across restarts of the same session.
 
 [decision]
 # Optional tev1 decision model (Ollama); when unreachable the harness

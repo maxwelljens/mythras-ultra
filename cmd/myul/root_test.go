@@ -41,6 +41,7 @@ func blankEnv(t *testing.T) {
 		"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
 		"MYUL_GAME_SEED", "MYUL_UI_COLOUR_MODE", "MYUL_UI_THEME",
 		"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
+		"MYUL_LLM_HEADERS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -259,11 +260,12 @@ func TestDoctorDecisionModelMissing(t *testing.T) {
 // provider's effective api-key env variable is set — ok / failed: $XX
 // unset — resolving the variable from the catalog when the config leaves
 // api_key_env empty. Like the other probes it never fails the exit code.
+// The endpoint probe needs a local base_url so the test stays offline.
 func TestDoctorAPIKeyEnvProbe(t *testing.T) {
 	blankEnv(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeConfig(t, path,
-		"[llm]\nprovider = \"deepseek\"\nmodel = \"deepseek-chat\"\n")
+		"[llm]\nprovider = \"deepseek\"\nmodel = \"deepseek-chat\"\nbase_url = \"http://127.0.0.1:1\"\n")
 	// Forced unset so the ambient environment cannot satisfy the probe.
 	t.Setenv("DEEPSEEK_API_KEY", "")
 
@@ -282,6 +284,117 @@ func TestDoctorAPIKeyEnvProbe(t *testing.T) {
 	}
 	if !strings.Contains(out, "ok: $DEEPSEEK_API_KEY set") {
 		t.Errorf("doctor output missing the set-key line: %q", out)
+	}
+}
+
+// TestDoctorLLMEndpoint probes <base>/models against a local server: a
+// 200 reports ok with the configured key and headers attached; a 401
+// surfaces the provider's own error body (api_key_expired) verbatim.
+// Neither outcome may fail the command.
+func TestDoctorLLMEndpoint(t *testing.T) {
+	blankEnv(t)
+	t.Run("ok", func(t *testing.T) {
+		var gotPath, gotAuth, gotCustom string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("Authorization")
+			gotCustom = r.Header.Get("x-custom-header")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		}))
+		defer srv.Close()
+
+		path := filepath.Join(t.TempDir(), "config.toml")
+		writeConfig(t, path,
+			"[llm]\nprovider = \"openaicompat\"\napi_key_env = \"MYUL_TEST_KEY\"\n"+
+				"base_url = "+strconv.Quote(srv.URL+"/v1/chat/completions")+"\n"+
+				"[llm.headers]\nx-custom-header = \"custom-value\"\n")
+		t.Setenv("MYUL_TEST_KEY", "sk-test")
+
+		out, err := execute(t, "--config", path, "doctor")
+		if err != nil {
+			t.Fatalf("doctor error = %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "ok: LLM endpoint reachable") {
+			t.Errorf("doctor output missing the reachable line: %q", out)
+		}
+		// full endpoint base normalises: /v1/models, not /v1/chat/completions/models
+		if gotPath != "/v1/models" {
+			t.Errorf("probe path = %q, want /v1/models", gotPath)
+		}
+		if gotAuth != "Bearer sk-test" {
+			t.Errorf("probe Authorization = %q, want %q", gotAuth, "Bearer sk-test")
+		}
+		if gotCustom != "custom-value" {
+			t.Errorf("probe x-custom-header = %q, want %q", gotCustom, "custom-value")
+		}
+	})
+
+	t.Run("provider error body surfaces", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error",` +
+				`"code":"api_key_expired","message":"This API key has expired..."}}`))
+		}))
+		defer srv.Close()
+
+		path := filepath.Join(t.TempDir(), "config.toml")
+		writeConfig(t, path,
+			"[llm]\nprovider = \"openaicompat\"\napi_key_env = \"MYUL_TEST_KEY\"\n"+
+				"base_url = "+strconv.Quote(srv.URL)+"\n")
+		t.Setenv("MYUL_TEST_KEY", "sk-test")
+
+		out, err := execute(t, "--config", path, "doctor")
+		if err != nil {
+			t.Fatalf("a failed endpoint probe must not fail doctor: %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "failed: 401 api_key_expired — This API key has expired...") {
+			t.Errorf("doctor output missing the provider error summary: %q", out)
+		}
+	})
+}
+
+// TestDoctorLLMNoEndpointSkipped: with no provider or base_url there is
+// nothing to probe — a skipped: line, never a failure.
+func TestDoctorLLMNoEndpointSkipped(t *testing.T) {
+	blankEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path, "[llm]\n")
+
+	out, err := execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "skipped: no LLM endpoint configured") {
+		t.Errorf("doctor output missing the skipped line: %q", out)
+	}
+}
+
+// TestDoctorLLMModelNotInCatalog: a model missing from the embedded
+// catalog for its provider gets an advisory note — catalogs go stale and
+// model ids are free-form, so it never blocks or fails anything.
+func TestDoctorLLMModelNotInCatalog(t *testing.T) {
+	blankEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path,
+		"[llm]\nprovider = \"opencode-go\"\nmodel = \"beam-free\"\napi_key_env = \"MYUL_TEST_KEY\"\n"+
+			"base_url = "+strconv.Quote(srv.URL)+"\n")
+	t.Setenv("MYUL_TEST_KEY", "sk-test")
+
+	out, err := execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v (output %q)", err, out)
+	}
+	want := `note: model "beam-free" is not in the embedded catalog (may still work — catalogs can be stale)`
+	if !strings.Contains(out, want) {
+		t.Errorf("doctor output missing the catalog note: %q", out)
 	}
 }
 

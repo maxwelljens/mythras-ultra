@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mythras-ultra/myul/internal/config"
+	"github.com/mythras-ultra/myul/internal/engine/resolve"
 	"github.com/mythras-ultra/myul/internal/harness/decide"
 	"github.com/mythras-ultra/myul/internal/harness/llm"
 	"github.com/mythras-ultra/myul/internal/harness/prompts"
@@ -78,10 +79,24 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 
 	// Headless runs never converse, so the model client is built only for
 	// play: creating a session must not need provider credentials.
+	//
+	// The provider session id (x-opencode-session) must be stable across
+	// restarts for prompt caching, so a fresh session's state — hence its
+	// id — is minted before the client is built; a resumed session reuses
+	// its persisted id (Store.Load guarantees state.ID == the directory
+	// id, so opts.id is the same id).
+	var st *resolve.State
+	if opts.id == "" {
+		st = resolve.NewState(opts.name, opts.seed)
+	}
+	sessionID := opts.id
+	if st != nil {
+		sessionID = st.ID
+	}
 	var client llm.Client
 	if !opts.noTUI {
 		var err error
-		if client, err = newLLMClient(cfg.LLM); err != nil {
+		if client, err = newLLMClient(cfg.LLM, sessionID); err != nil {
 			return err
 		}
 	}
@@ -97,6 +112,7 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 	scfg := session.Config{
 		Name:          opts.name,
 		Seed:          opts.seed,
+		State:         st,
 		ModelName:     label,
 		Store:         store,
 		Client:        client,
@@ -202,10 +218,12 @@ func requireSession(store *state.JSONStore, id string) error {
 }
 
 // newLLMClient builds the production model client from the [llm] section.
+// sessionID becomes the provider's x-opencode-session header (empty when no
+// session is playing, e.g. headless runs never build a client at all).
 // runSession only calls it for play: headless runs (`--no-tui`) never
 // converse, so creating a session needs no credentials, and play with no
 // model is refused earlier by runSession.
-func newLLMClient(cfg config.LLMConfig) (llm.Client, error) {
+func newLLMClient(cfg config.LLMConfig, sessionID string) (llm.Client, error) {
 	if cfg.Provider == "" {
 		return nil, nil
 	}
@@ -214,10 +232,13 @@ func newLLMClient(cfg config.LLMConfig) (llm.Client, error) {
 		key = os.Getenv(env)
 	}
 	client, err := llm.NewFantasyClient(llm.Config{
-		Provider: cfg.Provider,
-		Model:    cfg.Model,
-		APIKey:   key,
-		BaseURL:  cfg.BaseURL,
+		Provider:  cfg.Provider,
+		Model:     cfg.Model,
+		APIKey:    key,
+		BaseURL:   cfg.BaseURL,
+		Headers:   cfg.Headers,
+		SessionID: sessionID,
+		UserAgent: "myul/" + version,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("llm client: %w", err)
