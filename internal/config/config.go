@@ -79,6 +79,11 @@ type GameConfig struct {
 	Seed int64 `mapstructure:"seed"`
 	// Autosave persists session state after each accepted move.
 	Autosave bool `mapstructure:"autosave"`
+	// MaxToolRounds bounds one turn's tool-call loop: after this many
+	// dispatch rounds the next model reply is reported as an EventError
+	// (session-loop.md). Zero means "unset" and falls back to the
+	// session default (200); any other value must be 1..10000.
+	MaxToolRounds int `mapstructure:"max_tool_rounds"`
 	// HouseRules are named toggles consulted by the engine rules.
 	HouseRules map[string]bool `mapstructure:"house_rules"`
 }
@@ -109,9 +114,10 @@ func DefaultConfig() *Config {
 			Model:   "tev1:4b",
 		},
 		Game: GameConfig{
-			Seed:       0,
-			Autosave:   true,
-			HouseRules: map[string]bool{},
+			Seed:          0,
+			Autosave:      true,
+			MaxToolRounds: 200,
+			HouseRules:    map[string]bool{},
 		},
 		UI: UIConfig{
 			Theme:           "mythras",
@@ -169,6 +175,10 @@ func (c *Config) Validate() error {
 	if c.Game.Seed < 0 {
 		return fmt.Errorf("config: game.seed must be zero or positive, got %d", c.Game.Seed)
 	}
+	// 0 means "unset" and falls back to the session default (200).
+	if r := c.Game.MaxToolRounds; r < 0 || r > 10000 {
+		return fmt.Errorf("config: game.max_tool_rounds must be 0 (unset) or between 1 and 10000, got %d", r)
+	}
 	return nil
 }
 
@@ -189,6 +199,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("decision.model", "tev1:4b")
 	v.SetDefault("game.seed", 0)
 	v.SetDefault("game.autosave", true)
+	v.SetDefault("game.max_tool_rounds", 200)
 	v.SetDefault("ui.theme", "mythras")
 	v.SetDefault("ui.dice_animation", true)
 	v.SetDefault("ui.metadata_default", false)

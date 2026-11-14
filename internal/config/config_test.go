@@ -18,7 +18,7 @@ var scalarEnvKeys = []string{
 	"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
 	"MYUL_LLM_HEADERS",
 	"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
-	"MYUL_GAME_SEED", "MYUL_GAME_AUTOSAVE",
+	"MYUL_GAME_SEED", "MYUL_GAME_AUTOSAVE", "MYUL_GAME_MAX_TOOL_ROUNDS",
 	"MYUL_UI_THEME", "MYUL_UI_DICE_ANIMATION", "MYUL_UI_METADATA_DEFAULT", "MYUL_UI_COLOUR_MODE",
 }
 
@@ -50,6 +50,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !cfg.Game.Autosave {
 		t.Error("game.autosave default = false, want true")
+	}
+	if want := 200; cfg.Game.MaxToolRounds != want {
+		t.Errorf("game.max_tool_rounds default = %d, want %d", cfg.Game.MaxToolRounds, want)
 	}
 	if cfg.Game.HouseRules == nil {
 		t.Error("game.house_rules default = nil, want an empty map")
@@ -96,6 +99,7 @@ enabled = false
 
 [game]
 seed = 42
+max_tool_rounds = 7
 [game.house_rules]
 crit_fumble = true
 
@@ -118,6 +122,7 @@ persona = "/tmp/persona.md"
 				}
 				want.Decision.Enabled = false
 				want.Game.Seed = 42
+				want.Game.MaxToolRounds = 7
 				want.Game.HouseRules = map[string]bool{"crit_fumble": true}
 				want.UI = config.UIConfig{
 					Theme:           "obsidian",
@@ -257,6 +262,10 @@ func TestValidate(t *testing.T) {
 		{name: "negative seed", mutate: func(c *config.Config) { c.Game.Seed = -1 }, wantErr: true},
 		{name: "zero seed", mutate: func(c *config.Config) { c.Game.Seed = 0 }},
 		{name: "large seed", mutate: func(c *config.Config) { c.Game.Seed = 1 << 40 }},
+		{name: "zero max_tool_rounds means unset", mutate: func(c *config.Config) { c.Game.MaxToolRounds = 0 }},
+		{name: "max_tool_rounds in range", mutate: func(c *config.Config) { c.Game.MaxToolRounds = 10000 }},
+		{name: "negative max_tool_rounds", mutate: func(c *config.Config) { c.Game.MaxToolRounds = -1 }, wantErr: true},
+		{name: "max_tool_rounds over the cap", mutate: func(c *config.Config) { c.Game.MaxToolRounds = 10001 }, wantErr: true},
 	}
 
 	for _, tt := range tests {
