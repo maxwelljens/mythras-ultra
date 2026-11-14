@@ -17,26 +17,81 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mythras-ultra/myul/internal/config"
+	"github.com/mythras-ultra/myul/internal/harness/decide"
+	"github.com/mythras-ultra/myul/internal/state"
 )
 
 // configPath is the value of the persistent --config flag; the empty
 // string selects the default XDG config path.
 var configPath string
 
-// newRootCmd builds the myul command tree for this build.
+// newRootCmd builds the myul command tree for this build. With no
+// subcommand, bare `myul` plays (see runDefaultSession).
 func newRootCmd() *cobra.Command {
+	// noTUI is bare `myul --no-tui`: resolve the session without the TUI,
+	// the headless seam for scripts and tests (flag registration below
+	// resets it, so every command tree starts fresh).
+	var noTUI bool
 	root := &cobra.Command{
 		Use:          "myul",
 		Short:        "Mythras Ultra — an LLM-driven Mythras Imperative TTRPG harness",
 		SilenceUsage: true, // errors already say what went wrong; no usage dump
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runDefaultSession(cmd, noTUI)
+		},
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "",
 		"path to config file (default: <config dir>/config.toml)")
+	root.Flags().BoolVar(&noTUI, "no-tui", false,
+		"create or resume the session without starting the TUI (prints its id and exits)")
 
+	root.AddCommand(newNewCmd())
+	root.AddCommand(newResumeCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newSessionsCmd())
+	root.AddCommand(newDeleteCmd())
+	root.AddCommand(newExportCmd())
 	return root
+}
+
+// runDefaultSession implements bare `myul`: an interactive terminal gets
+// the session picker (newest session preselected, plus an option to start
+// a new session), while a headless run resumes infos[0] — the most
+// recently updated session — when noTUI is set, and otherwise reports how
+// to play (`--no-tui` is the headless seam: it flushes and prints the
+// id). An empty store falls through to `myul new`: the interactive form
+// when a terminal is attached, otherwise the non-interactive branch,
+// which prints how to start a session and exits 1 (ARCHITECTURE.md §8).
+func runDefaultSession(cmd *cobra.Command, noTUI bool) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	store := state.NewJSONStore(config.DataDir(), nil)
+	infos, err := store.List()
+	if err != nil {
+		return fmt.Errorf("myul: %w", err)
+	}
+	if len(infos) == 0 {
+		return runNew(cmd, cfg, newSessionFlags{noTUI: noTUI}, nil)
+	}
+	if !isTerminal(cmd) {
+		// No picker without a terminal: infos[0] is the newest session
+		// (Store.List orders by UpdatedAt descending).
+		return runSession(cmd, cfg, sessionOptions{id: infos[0].ID, noTUI: noTUI})
+	}
+	// pickSession returns "" when the picker's "start a new session"
+	// option is chosen.
+	id, err := pickSession(cmd, store, true)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return runNew(cmd, cfg, newSessionFlags{noTUI: noTUI}, nil)
+	}
+	return runSession(cmd, cfg, sessionOptions{id: id, noTUI: noTUI})
 }
 
 // newVersionCmd prints the build version and date.
@@ -115,7 +170,8 @@ func writeDefaultConfig(path string, force bool) error {
 	return nil
 }
 
-// newDoctorCmd validates the config and probes the decision model.
+// newDoctorCmd validates the config and probes the decision model: the
+// reachability probe below, then the real decide client's model check.
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
@@ -135,9 +191,32 @@ func newDoctorCmd() *cobra.Command {
 				_, err := fmt.Fprintln(out, "skipped: decision model disabled")
 				return err
 			}
-			return probeDecisionModel(cmd, out, cfg.Decision.URL)
+			if err := probeDecisionModel(cmd, out, cfg.Decision.URL); err != nil {
+				return err
+			}
+			return probeDecisionModelPresence(cmd, out, cfg)
 		},
 	}
+}
+
+// probeDecisionModelPresence asks the real decide client whether the
+// configured model is actually present (the reachability probe only proves
+// the server answers). Like the probe, a failure is reported but never
+// returned: an unreachable or unpulled decision model is a supported
+// degraded state (ARCHITECTURE §3.3).
+func probeDecisionModelPresence(cmd *cobra.Command, out io.Writer, cfg *config.Config) error {
+	client := decide.New(decide.Config{
+		Enabled: true,
+		URL:     cfg.Decision.URL,
+		Model:   cfg.Decision.Model,
+		Timeout: 2 * time.Second,
+	})
+	if err := client.Healthy(cmd.Context()); err != nil {
+		_, ferr := fmt.Fprintf(out, "failed: decision model check: %v\n", err)
+		return ferr
+	}
+	_, err := fmt.Fprintf(out, "ok: decision model available (%s)\n", cfg.Decision.Model)
+	return err
 }
 
 // probeDecisionModel sends one 2s HTTP GET to decision.url + /api/tags
@@ -204,7 +283,8 @@ metadata_default = false
 # One of "adaptive", "16", "terminal".
 colour_mode = "adaptive"
 
-# Prompt-name → file path overrides for embedded prompts, e.g.:
+# Prompt overrides: system = <path> replaces the embedded GM system prompt
+# wholesale (text/template syntax, same {{.SessionName}}-style placeholders).
 # [prompts]
-# persona = "/home/me/prompts/persona.md"
+# system = "/home/me/prompts/system.md"
 `

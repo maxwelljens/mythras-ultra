@@ -12,19 +12,22 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mythras-ultra/myul/internal/config"
 )
 
 // execute runs the root command with args and returns everything it
-// printed on stdout/stderr.
+// printed on stdout/stderr. The args slice is always non-nil: cobra
+// falls back to os.Args[1:] for a nil slice, which would hand the test
+// binary's own flags to the command.
 func execute(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	var buf bytes.Buffer
 	cmd := newRootCmd()
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs(args)
+	cmd.SetArgs(append([]string{}, args...))
 	err := cmd.Execute()
 	return buf.String(), err
 }
@@ -37,8 +40,31 @@ func blankEnv(t *testing.T) {
 	for _, key := range []string{
 		"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
 		"MYUL_GAME_SEED", "MYUL_UI_COLOUR_MODE", "MYUL_UI_THEME",
+		"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+// isolatedDirs points the config and data directories at fresh temp
+// dirs, so a test's commands never read the developer's configuration or
+// write into the real session store.
+func isolatedDirs(t *testing.T) (dataDir, configDir string) {
+	t.Helper()
+	blankEnv(t)
+	dataDir = t.TempDir()
+	configDir = t.TempDir()
+	t.Setenv("MYUL_DATA_DIR", dataDir)
+	t.Setenv("MYUL_CONFIG_DIR", configDir)
+	return dataDir, configDir
+}
+
+// writeConfig writes a config file at path (0600, like the config
+// package's own tests).
+func writeConfig(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write config %s: %v", path, err)
 	}
 }
 
@@ -169,5 +195,121 @@ func TestDoctorUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(out, "failed: decision model unreachable") {
 		t.Errorf("doctor output missing failure line: %q", out)
+	}
+}
+
+// decisionConfig writes a config file whose [decision] section points at
+// url with the given model tag.
+func decisionConfig(t *testing.T, url, model string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[decision]\nurl = " + strconv.Quote(url) + "\nmodel = " + strconv.Quote(model) + "\n"
+	writeConfig(t, path, contents)
+	return path
+}
+
+// TestDoctorDecisionModelAvailable drives the real decide client's
+// Healthy probe: a server that lists the configured model reports ok.
+func TestDoctorDecisionModelAvailable(t *testing.T) {
+	blankEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Errorf("probe path = %q, want /api/tags", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"tev1:4b"}]}`))
+	}))
+	defer srv.Close()
+
+	path := decisionConfig(t, srv.URL, "tev1:4b")
+	out, err := execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "ok: decision model available (tev1:4b)") {
+		t.Errorf("doctor output missing model check line: %q", out)
+	}
+}
+
+// TestDoctorDecisionModelMissing: the endpoint answers but does not serve
+// the configured model. Like reachability, that is a degraded state
+// (ARCHITECTURE §3.3) — reported as failed, exit code stays clean.
+func TestDoctorDecisionModelMissing(t *testing.T) {
+	blankEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"llama3:8b"}]}`))
+	}))
+	defer srv.Close()
+
+	path := decisionConfig(t, srv.URL, "tev1:4b")
+	out, err := execute(t, "--config", path, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v (a missing model must not fail the command)", err)
+	}
+	if !strings.Contains(out, "ok: decision model reachable") {
+		t.Errorf("doctor output missing reachability line: %q", out)
+	}
+	if !strings.Contains(out, "failed: decision model check") {
+		t.Errorf("doctor output missing model check failure: %q", out)
+	}
+}
+
+// TestBareRootEmptyStore: with nothing to resume and no terminal, bare
+// `myul` prints how to start a session and exits 1 — guidance, not a
+// stack trace and not a hang.
+func TestBareRootEmptyStore(t *testing.T) {
+	dataDir, _ := isolatedDirs(t)
+
+	out, err := execute(t)
+	if err == nil {
+		t.Fatalf("bare myul on an empty store: want error (exit 1), got nil (output %q)", out)
+	}
+	if !strings.Contains(err.Error(), "myul new") {
+		t.Errorf("guidance missing `myul new`: %q", err)
+	}
+	if entries, rerr := os.ReadDir(filepath.Join(dataDir, "sessions")); rerr == nil && len(entries) > 0 {
+		t.Errorf("bare myul created %d session(s) on an empty store", len(entries))
+	}
+}
+
+// TestBareRootResumesNewestSession covers the headless bare-root path
+// (--no-tui is its documented test/script seam): the most recently
+// updated session is resumed and its id printed.
+func TestBareRootResumesNewestSession(t *testing.T) {
+	isolatedDirs(t)
+	first := createSession(t, "First")
+	// UpdatedAt stamps decide Store.List's order; separate them.
+	time.Sleep(20 * time.Millisecond)
+	second := createSession(t, "Second")
+
+	out, err := execute(t, "--no-tui")
+	if err != nil {
+		t.Fatalf("bare myul --no-tui error = %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "resumed session "+second) {
+		t.Errorf("bare myul --no-tui did not resume the newest session %q: %q", second, out)
+	}
+	if strings.Contains(out, "resumed session "+first) {
+		t.Errorf("bare myul --no-tui resumed the older session %q: %q", first, out)
+	}
+}
+
+// TestBareRootWithoutTerminalNeedsNoTUI: with one session but no
+// --no-tui, a headless bare `myul` refuses to play instead of hanging.
+// A model is configured so the refusal is the terminal check, not the
+// configuration check.
+func TestBareRootWithoutTerminalNeedsNoTUI(t *testing.T) {
+	_, configDir := isolatedDirs(t)
+	writeConfig(t, filepath.Join(configDir, "config.toml"),
+		"[llm]\nprovider = \"openaicompat\"\nmodel = \"test-model\"\n")
+	_ = createSession(t, "Only")
+
+	out, err := execute(t)
+	if err == nil {
+		t.Fatalf("bare myul without a terminal: want error, got nil (output %q)", out)
+	}
+	if !strings.Contains(err.Error(), "interactive terminal is required") {
+		t.Errorf("error should ask for --no-tui or a terminal: %q", err)
 	}
 }
