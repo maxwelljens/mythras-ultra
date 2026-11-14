@@ -16,8 +16,9 @@ import (
 
 // JSONStore is the on-disk Store: sessions live under
 // <root>/sessions/<id>/ with state.json (atomic, with the newest
-// SnapshotKeep timestamped snapshots), log.jsonl (append-only) and
-// chat.json (the conversation, atomic).
+// SnapshotKeep timestamped snapshots), log.jsonl (append-only),
+// chat.json (the conversation, atomic) and meta.json (the session's UI
+// preferences, atomic).
 //
 // The now function stamps Save's UpdatedAt/CreatedAt and Record's At — the
 // STORE may use clocks, the ENGINE may not; pass a fixed clock in tests.
@@ -372,6 +373,48 @@ func (j *JSONStore) LoadChat(id string) ([]byte, error) {
 	}
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("%w: %q chat.json is corrupt", ErrNotFound, id)
+	}
+	return data, nil
+}
+
+// SaveMeta writes data to sessions/<id>/meta.json with the same atomic
+// dance as chat.json (temp file + fsync + rename), so a crash mid-save
+// keeps the previous preferences intact. The bytes are opaque — the caller
+// (session) marshals them; the store only persists them.
+func (j *JSONStore) SaveMeta(id string, data []byte) error {
+	dir, err := j.sessionDir(id)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("state: create session dir: %w", err)
+	}
+	if err := j.writeFileAtomic(filepath.Join(dir, "meta.json"), data); err != nil {
+		return fmt.Errorf("state: save meta for %q: %w", id, err)
+	}
+	return nil
+}
+
+// LoadMeta reads sessions/<id>/meta.json. A missing file — and bytes that
+// do not parse, the corrupt-file signature of a file mangled outside the
+// atomic write — both report ErrNotFound, so a resume degrades to "no
+// saved preferences" instead of failing. I/O problems other than absence
+// (permissions, the sessions root unreadable) surface as errors: those
+// must not look like "no preferences".
+func (j *JSONStore) LoadMeta(id string) ([]byte, error) {
+	dir, err := j.sessionDir(id)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %q has no meta.json", ErrNotFound, id)
+		}
+		return nil, fmt.Errorf("state: read meta for %q: %w", id, err)
+	}
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("%w: %q meta.json is corrupt", ErrNotFound, id)
 	}
 	return data, nil
 }

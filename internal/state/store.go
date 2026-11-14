@@ -1,6 +1,7 @@
 // Package state persists play sessions: the Store interface, an atomic JSON
-// implementation under sessions/<id>/, the append-only move log and the
-// conversation snapshot in chat.json (ARCHITECTURE.md §5).
+// implementation under sessions/<id>/, the append-only move log, the
+// conversation snapshot in chat.json and the session preferences in
+// meta.json (ARCHITECTURE.md §5).
 //
 // This layer owns wall time — its clock is injectable for tests — and it is
 // the trust boundary for files on disk: Load validates session IDs (no path
@@ -96,4 +97,14 @@ type Store interface {
 	// (a truncated or hand-mangled file degrades to "no saved
 	// conversation" instead of failing the resume).
 	LoadChat(id string) ([]byte, error)
+	// SaveMeta writes the session's small metadata bytes (UI-level
+	// preferences such as the last IC/OOC channel) to meta.json
+	// atomically, like chat.json. The bytes are opaque here — the caller
+	// marshals them.
+	SaveMeta(id string, data []byte) error
+	// LoadMeta reads the bytes SaveMeta wrote. ErrNotFound when the
+	// session has no meta.json and also when its contents are corrupt
+	// (a mangled file degrades to "no saved preferences" instead of
+	// failing the resume).
+	LoadMeta(id string) ([]byte, error)
 }

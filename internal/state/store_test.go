@@ -609,6 +609,65 @@ func TestSaveChatAtomicFailure(t *testing.T) {
 	}
 }
 
+// TestSaveMetaLoadMeta covers the session-preference snapshot: byte-exact
+// round-trip, overwrite, unsafe IDs, and LoadMeta's ladder — absent and
+// corrupt files both report ErrNotFound (a resume degrades to the default
+// preferences), while a real I/O problem stays a real error.
+func TestSaveMetaLoadMeta(t *testing.T) {
+	store, _ := testStore(t)
+
+	// Nothing written yet: ErrNotFound, not an empty success.
+	if _, err := store.LoadMeta("s-meta"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadMeta on a fresh session error = %v, want ErrNotFound", err)
+	}
+	for _, bad := range []string{"", ".", "..", "../evil", "a/b"} {
+		if _, err := store.LoadMeta(bad); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("LoadMeta(%q) error = %v, want ErrInvalidID", bad, err)
+		}
+		if err := store.SaveMeta(bad, nil); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("SaveMeta(%q) error = %v, want ErrInvalidID", bad, err)
+		}
+	}
+
+	// Round-trip: the store returns exactly the bytes it was given.
+	data := []byte(`{"channel":"OOC"}`)
+	if err := store.SaveMeta("s-meta", data); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+	got, err := store.LoadMeta("s-meta")
+	if err != nil {
+		t.Fatalf("LoadMeta: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("LoadMeta = %s, want %s", got, data)
+	}
+	// Overwrite keeps the latest preferences (a mode switch mid-session).
+	if err := store.SaveMeta("s-meta", []byte(`{"channel":"IC"}`)); err != nil {
+		t.Fatalf("SaveMeta overwrite: %v", err)
+	}
+	got, err = store.LoadMeta("s-meta")
+	if err != nil {
+		t.Fatalf("LoadMeta after overwrite: %v", err)
+	}
+	if string(got) != `{"channel":"IC"}` {
+		t.Errorf("LoadMeta = %s, want the overwritten bytes", got)
+	}
+	// Saving without a prior state.Save still lands (like SaveChat).
+	if err := store.SaveMeta("s-newborn", data); err != nil {
+		t.Fatalf("SaveMeta without save: %v", err)
+	}
+
+	// Corrupt bytes read as ErrNotFound — tolerant recovery, never a
+	// decode crash at resume.
+	metaPath := filepath.Join(store.root, "sessions", "s-meta", "meta.json")
+	if err := os.WriteFile(metaPath, []byte(`{"channel": "OC`), 0o644); err != nil {
+		t.Fatalf("corrupt meta.json: %v", err)
+	}
+	if _, err := store.LoadMeta("s-meta"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LoadMeta on corrupt file error = %v, want ErrNotFound", err)
+	}
+}
+
 // TestRecordReadLogChatEntry pins the chat entry round-trip: fields come
 // back exactly, in order, beside move entries that read with Chat nil
 // (old lines unaffected by the additive field).
