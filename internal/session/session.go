@@ -9,9 +9,11 @@
 // [Resume] is the only writer of the game state and the conversation
 // history; [Session.Metadata] reads the state under the read side of a
 // mutex, and events are emitted from that same goroutine, which is what
-// guarantees the ordering the TUI relies on (the player's echo first, then
-// one tool annotation before its dice). [Session.Send] only enqueues, so it
-// never blocks on the model.
+// guarantees the ordering the TUI relies on (the player's echo first, one
+// EventThinking before each model call, one tool annotation before its
+// dice, EventTurnEnd last). A resumed session's replayed play history is
+// emitted by that goroutine before it processes any input. [Session.Send]
+// only enqueues, so it never blocks on the model.
 package session
 
 import (
@@ -76,7 +78,7 @@ type Config struct {
 	// ModelName labels the language model in metadata and the TUI header,
 	// usually "provider/model".
 	ModelName string
-	// Store persists state.json and log.jsonl. Required.
+	// Store persists state.json, log.jsonl and chat.json. Required.
 	Store state.Store
 	// Client converses with the LLM. Optional: a session created for
 	// `myul new --no-tui` without a configured provider has none, and its
@@ -147,7 +149,7 @@ type Session struct {
 	// goroutine (through tool dispatch, saves and local moves) and read by
 	// Metadata under mu.
 	state *resolve.State
-	// store persists state.json and log.jsonl.
+	// store persists state.json, log.jsonl and chat.json.
 	store state.Store
 	// client is the model behind turns; nil means turns report ErrNoClient.
 	client llm.Client
@@ -160,8 +162,15 @@ type Session struct {
 	overrides prompts.Overrides
 	// history is the conversation (system prompt excluded): user,
 	// assistant and tool messages, oldest first. Written only by the
-	// runner goroutine.
+	// runner goroutine, seeded from chat.json by [Resume] before the
+	// runner starts.
 	history []llm.Message
+	// replay holds what Resume queued before the runner started: a
+	// resume notice when chat.json is unusable, then the prior play
+	// rebuilt from log.jsonl. The runner delivers it before it processes
+	// input; none of it is recorded again (the play came from the log —
+	// recording happens only for freshly produced events).
+	replay []tui.Event
 	// events is the single channel the TUI reads; closed by Close.
 	events chan tui.Event
 	// inputs queues player messages for the runner; Send writes, the
@@ -217,8 +226,13 @@ func New(cfg Config) (*Session, error) {
 // Resume continues a saved session: Store.Load runs Normalize (re-binding
 // encounter pointer identity), and the RNG stream picks up exactly where
 // the last process stopped — Resume never reseeds. The conversation
-// history starts empty; continuity comes from the system prompt's recap and
-// summaries, rebuilt from state on every turn.
+// history resumes from chat.json (written at every autosaved turn end, on
+// /save and on Close); when that file is missing or corrupt the turn loop
+// starts with an empty history and one system event says so — continuity
+// then comes from the system prompt's recap and summaries, rebuilt from
+// state on every turn. The play recorded in log.jsonl is queued for
+// replay before the runner starts, so the TUI shows the history
+// immediately (chat.go, session-loop.md "Chat persistence & replay").
 func Resume(cfg Config, id string) (*Session, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -233,6 +247,8 @@ func Resume(cfg Config, id string) (*Session, error) {
 		return nil, fmt.Errorf("session: resume %q: normalize: %w", id, err)
 	}
 	s := cfg.build(st)
+	s.loadChat()
+	s.loadReplay()
 	s.start()
 	return s, nil
 }

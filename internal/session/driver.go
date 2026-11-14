@@ -66,10 +66,11 @@ func (s *Session) Metadata() tui.Metadata {
 }
 
 // Close releases the session: it stops the runner (cancelling any in-flight
-// model call), performs the final save, writes transcript.md next to
-// state.json, and closes the Events channel. It is idempotent — every call
-// after the first returns nil — and safe to call while a turn is running:
-// the turn's partial state is whatever moves were accepted, each of which
+// model call), performs the final save of state and conversation
+// (state.json + chat.json), writes transcript.md next to state.json, and
+// closes the Events channel. It is idempotent — every call after the first
+// returns nil — and safe to call while a turn is running: the turn's
+// partial state is whatever moves were accepted, each of which
 // is atomic (session-loop.md failure policy).
 func (s *Session) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
@@ -80,6 +81,9 @@ func (s *Session) Close() error {
 	<-s.done      // the runner has exited: no more writers or emitters
 	var errs []error
 	if err := s.save(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.saveChat(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := s.writeTranscript(); err != nil {

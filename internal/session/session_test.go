@@ -88,6 +88,37 @@ func nextEvents(t *testing.T, s *Session, n int) []tui.Event {
 	return events
 }
 
+// kindsOf renders the event kinds of a sequence for failure messages.
+func kindsOf(events []tui.Event) []tui.EventKind {
+	kinds := make([]tui.EventKind, len(events))
+	for i, ev := range events {
+		kinds[i] = ev.Kind
+	}
+	return kinds
+}
+
+// drainReplay reads exactly the events Resume replayed — one per chat line
+// log.jsonl held when the session was constructed (plus any resume note) —
+// so a test can start from the fresh stream the runner produces afterwards.
+// The count comes from the log itself: replay is read-only, so nothing
+// records while it drains.
+func drainReplay(t *testing.T, s *Session) {
+	t.Helper()
+	entries, err := s.store.ReadLog(s.ID())
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	var n int
+	for _, e := range entries {
+		if e.Chat != nil {
+			n++
+		}
+	}
+	for range n {
+		nextEvent(t, s)
+	}
+}
+
 // mustApply runs one engine move against the session's live state (the
 // runner is idle — no input queued — so the test goroutine is the only
 // writer).
@@ -129,9 +160,11 @@ func rollTotal(t *testing.T, s *Session) int {
 }
 
 // TestTurnEventOrder pins the transcript ordering the TUI depends on: the
-// verbatim echo first, then the scripted narration, the tool annotation,
-// its dice (with the engine's grade as the outcome) and the closing
-// narration — plus the model seeing the system prompt and the tool result.
+// verbatim echo first, EventThinking bracketing every model call, the
+// scripted narration, the tool annotation, its dice (with the engine's
+// grade as the outcome) and the closing narration — then exactly one
+// EventTurnEnd — plus the model seeing the system prompt and the tool
+// result.
 func TestTurnEventOrder(t *testing.T) {
 	client := llm.NewScripted(
 		llm.ScriptedTurn{Response: llm.ChatResponse{Message: llm.Message{
@@ -154,20 +187,36 @@ func TestTurnEventOrder(t *testing.T) {
 	if err := s.Send(t.Context(), tui.ChannelIC, sent); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	events := nextEvents(t, s, 5)
+	events := nextEvents(t, s, 8)
 
-	if ev := events[0]; ev.Kind != tui.EventNarrative || ev.Markdown != sent || ev.Channel != tui.ChannelIC {
+	// The exact sequence the throbber and the tag grouping rely on.
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, // the player's echo
+		tui.EventThinking,  // first model call
+		tui.EventNarrative, // streamed narration
+		tui.EventToolAnnotation,
+		tui.EventDice,
+		tui.EventThinking,  // re-invocation after the tool round
+		tui.EventNarrative, // closing narration
+		tui.EventTurnEnd,
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if ev := events[0]; ev.Markdown != sent || ev.Channel != tui.ChannelIC {
 		t.Errorf("first event = %+v, want a verbatim echo on the IC channel", ev)
 	}
-	if ev := events[1]; ev.Kind != tui.EventNarrative || ev.Markdown != "You steady your nerve.\n" {
-		t.Errorf("second event = %+v, want the scripted narration", ev)
+	if ev := events[2]; ev.Markdown != "You steady your nerve.\n" {
+		t.Errorf("third event = %+v, want the scripted narration", ev)
 	}
-	if ev := events[2]; ev.Kind != tui.EventToolAnnotation || ev.Annotation == nil ||
+	if ev := events[3]; ev.Annotation == nil ||
 		ev.Annotation.ToolName != "skill_test" || !ev.Annotation.OK {
-		t.Errorf("third event = %+v, want an OK skill_test annotation", ev)
+		t.Errorf("fourth event = %+v, want an OK skill_test annotation", ev)
 	}
-	if ev := events[3]; ev.Kind != tui.EventDice || ev.Dice == nil {
-		t.Errorf("fourth event = %+v, want the skill_test roll", ev)
+	if ev := events[4]; ev.Dice == nil {
+		t.Errorf("fifth event = %+v, want the skill_test roll", ev)
 	} else {
 		if len(ev.Dice.Dice) != 1 || ev.Dice.Total != ev.Dice.Dice[0] {
 			t.Errorf("dice = %+v, want one 1d100 die and Total == that die", ev.Dice)
@@ -178,8 +227,8 @@ func TestTurnEventOrder(t *testing.T) {
 			t.Errorf("outcome = %q, want the engine's grade", ev.Dice.Outcome)
 		}
 	}
-	if ev := events[4]; ev.Kind != tui.EventNarrative || ev.Markdown != "The relic glimmers in the dark." {
-		t.Errorf("fifth event = %+v, want the closing narration", ev)
+	if ev := events[6]; ev.Markdown != "The relic glimmers in the dark." {
+		t.Errorf("seventh event = %+v, want the closing narration", ev)
 	}
 
 	reqs := client.Requests()
@@ -203,17 +252,31 @@ func TestTurnEventOrder(t *testing.T) {
 		}
 	}
 
-	// The audit log carries the move and the call that produced it.
+	// The audit log carries the play itself interleaved with the move
+	// that produced it, in true order: echo, streamed narration, the
+	// skill_test dispatch, closing narration.
 	entries, err := s.store.ReadLog(s.ID())
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("log entries = %d, want 2 (session start + skill_test)", len(entries))
+	if len(entries) != 5 {
+		t.Fatalf("log entries = %d, want 5 (session start, echo, narration, skill_test, closing narration)", len(entries))
 	}
-	if entries[1].Kind != "skill_test" || entries[1].Error != "" ||
-		!strings.Contains(string(entries[1].Move), `"id":"t1"`) {
-		t.Errorf("log entry = %+v, want an OK skill_test recording call t1", entries[1])
+	if e := entries[1]; e.Kind != "chat" || e.Chat == nil ||
+		!e.Chat.Player || e.Chat.Channel != "IC" || e.Chat.Kind != "narrative" || e.Chat.Text != sent {
+		t.Errorf("entry 1 = %+v, want the player echo as a chat line", e)
+	}
+	if e := entries[2]; e.Kind != "chat" || e.Chat == nil || e.Chat.Player ||
+		e.Chat.Text != "You steady your nerve.\n" {
+		t.Errorf("entry 2 = %+v, want the GM narration as a chat line", e)
+	}
+	if entries[3].Kind != "skill_test" || entries[3].Error != "" ||
+		!strings.Contains(string(entries[3].Move), `"id":"t1"`) {
+		t.Errorf("log entry = %+v, want an OK skill_test recording call t1", entries[3])
+	}
+	if e := entries[4]; e.Kind != "chat" || e.Chat == nil || e.Chat.Player ||
+		e.Chat.Text != "The relic glimmers in the dark." {
+		t.Errorf("entry 4 = %+v, want the closing narration as a chat line", e)
 	}
 }
 
@@ -251,8 +314,10 @@ func TestSlashRoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
-	if len(entries) != 2 || entries[1].Kind != "roll_dice" {
-		t.Fatalf("log entries = %v, want a roll_dice entry after the session start", entries)
+	if len(entries) != 3 || entries[1].Kind != "chat" ||
+		entries[1].Chat == nil || !entries[1].Chat.Player ||
+		entries[2].Kind != "roll_dice" {
+		t.Fatalf("log entries = %v, want the player's /roll echo then a roll_dice entry", entries)
 	}
 }
 
@@ -333,7 +398,8 @@ func TestUnknownSlashCommand(t *testing.T) {
 
 // TestOOCTurnTagged sends on the OOC channel: the echo carries the channel
 // (the TUI tags "[ooc]"), the model sees the message tagged in its text,
-// and the reply stays on the channel.
+// the reply stays on the channel, and the turn is bracketed by
+// thinking/turn-end events.
 func TestOOCTurnTagged(t *testing.T) {
 	client := llm.NewScripted(scriptedText("Out of character: the abbey lies a day east."))
 	s := newTestSession(t, client)
@@ -342,12 +408,23 @@ func TestOOCTurnTagged(t *testing.T) {
 	if err := s.Send(t.Context(), tui.ChannelOOC, sent); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	events := nextEvents(t, s, 2)
-	if ev := events[0]; ev.Kind != tui.EventNarrative || ev.Markdown != sent || ev.Channel != tui.ChannelOOC {
+	events := nextEvents(t, s, 4)
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, // the verbatim echo
+		tui.EventThinking,
+		tui.EventNarrative, // the reply
+		tui.EventTurnEnd,
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if ev := events[0]; ev.Markdown != sent || ev.Channel != tui.ChannelOOC {
 		t.Errorf("first event = %+v, want the verbatim echo on the OOC channel", ev)
 	}
-	if ev := events[1]; ev.Kind != tui.EventNarrative || ev.Channel != tui.ChannelOOC {
-		t.Errorf("second event = %+v, want the reply on the OOC channel", ev)
+	if ev := events[2]; ev.Channel != tui.ChannelOOC {
+		t.Errorf("reply event = %+v, want the reply on the OOC channel", ev)
 	}
 	req, ok := client.LastRequest()
 	if !ok {
@@ -357,6 +434,20 @@ func TestOOCTurnTagged(t *testing.T) {
 	user := msgs[len(msgs)-1]
 	if user.Role != llm.RoleUser || user.Content != oocTag+sent {
 		t.Errorf("last message = %+v, want the user text tagged %q", user, oocTag)
+	}
+	// The echo is recorded as an OOC player chat line — the label the
+	// replay on the next Resume maps back to ChannelOOC.
+	entries, err := s.store.ReadLog(s.ID())
+	if err != nil {
+		t.Fatalf("ReadLog: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("log entries = %d, want 3 (session, echo, reply)", len(entries))
+	}
+	chat := entries[1].Chat
+	if entries[1].Kind != "chat" || chat == nil || !chat.Player ||
+		chat.Channel != "OOC" || chat.Text != sent {
+		t.Errorf("entry 1 = %+v, want the OOC player echo", entries[1])
 	}
 }
 
@@ -377,12 +468,23 @@ func TestImpossibleResultReachesModel(t *testing.T) {
 	if err := s.Send(t.Context(), tui.ChannelIC, "I strike the wraith."); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	events := nextEvents(t, s, 3) // echo, annotation, closing narration (round one is silent)
-	if ev := events[1]; ev.Kind != tui.EventToolAnnotation || ev.Annotation == nil || ev.Annotation.OK {
-		t.Errorf("second event = %+v, want a failed annotation", ev)
+	events := nextEvents(t, s, 6)
+	// echo, thinking, annotation (round one is silent), thinking, closing
+	// narration, turn end.
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, tui.EventThinking, tui.EventToolAnnotation,
+		tui.EventThinking, tui.EventNarrative, tui.EventTurnEnd,
 	}
-	if ev := events[2]; ev.Kind != tui.EventNarrative || ev.Markdown != "The blow passes through the wraith." {
-		t.Errorf("third event = %+v, want the turn to complete with narration", ev)
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if ev := events[2]; ev.Annotation == nil || ev.Annotation.OK {
+		t.Errorf("third event = %+v, want a failed annotation", ev)
+	}
+	if ev := events[4]; ev.Markdown != "The blow passes through the wraith." {
+		t.Errorf("fifth event = %+v, want the turn to complete with narration", ev)
 	}
 	reqs := client.Requests()
 	if len(reqs) != 2 {
@@ -397,24 +499,36 @@ func TestImpossibleResultReachesModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
-	if len(entries) != 2 || !strings.Contains(entries[1].Error, "IMPOSSIBLE:") {
-		t.Errorf("log = %+v, want the refusal recorded", entries)
+	if len(entries) != 4 || entries[2].Kind != "skill_test" ||
+		!strings.Contains(entries[2].Error, "IMPOSSIBLE:") ||
+		entries[3].Kind != "chat" {
+		t.Errorf("log = %+v, want the refusal between the echo and its narration chat lines", entries)
 	}
 }
 
 // TestModelFailureRollsBackTurn proves the failure policy: a model error
-// becomes an error line and the partial turn leaves history untouched.
+// becomes an error line, the partial turn leaves history untouched, and
+// the aborted turn still ends with exactly one EventTurnEnd.
 func TestModelFailureRollsBackTurn(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted()) // script exhausted on the first call
 	if err := s.Send(t.Context(), tui.ChannelIC, "Hello?"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	echo, problem := nextEvent(t, s), nextEvent(t, s)
-	if echo.Markdown != "Hello?" {
+	events := nextEvents(t, s, 4)
+	// echo, thinking (the call was attempted), error, turn end.
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, tui.EventThinking, tui.EventError, tui.EventTurnEnd,
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if echo := events[0]; echo.Markdown != "Hello?" {
 		t.Errorf("first event = %+v, want the verbatim echo", echo)
 	}
-	if problem.Kind != tui.EventError || !strings.Contains(problem.Markdown, "rolled back") {
-		t.Errorf("second event = %+v, want a rollback error line", problem)
+	if problem := events[2]; !strings.Contains(problem.Markdown, "rolled back") {
+		t.Errorf("third event = %+v, want a rollback error line", problem)
 	}
 	if len(s.history) != 0 {
 		t.Errorf("history has %d messages, want the turn rolled back to nothing", len(s.history))
@@ -432,11 +546,17 @@ func TestCompactionWindowsHistory(t *testing.T) {
 	)
 	s := newTestSession(t, client, func(c *Config) { c.HistoryWindow = 2 })
 
-	for _, text := range []string{"hello one", "hello two"} {
+	for i, text := range []string{"hello one", "hello two"} {
 		if err := s.Send(t.Context(), tui.ChannelIC, text); err != nil {
 			t.Fatalf("Send %q: %v", text, err)
 		}
-		nextEvents(t, s, 2) // echo + narration
+		// Turn one: echo, thinking, narration, turn end. Turn two adds
+		// the compaction's own thinking event before its turn end.
+		n := 4
+		if i == 1 {
+			n = 5
+		}
+		nextEvents(t, s, n)
 	}
 	// The summary call runs at the end of turn two; a local command runs
 	// strictly after it (one runner goroutine), so its events prove
@@ -487,7 +607,7 @@ func TestCloseIsIdempotentWritesTranscript(t *testing.T) {
 		t.Error("events channel is still open after Close")
 	}
 	dir := filepath.Join(s.sessionsDir, s.ID())
-	for _, name := range []string{"state.json", "transcript.md"} {
+	for _, name := range []string{"state.json", "transcript.md", "chat.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("%s missing after Close: %v", name, err)
 		}
@@ -544,6 +664,7 @@ func TestResumeContinuesRNGStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
+	drainReplay(t, continued) // the recorded /roll echo replays first
 	gotSecond := rollTotal(t, continued)
 	if err := continued.Close(); err != nil {
 		t.Fatalf("Close resumed: %v", err)
@@ -646,7 +767,11 @@ func TestToolLoopBound(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	var problem tui.Event
-	for range 2 + 2*maxToolRounds + 2 {
+	// The run-up to the bound error: the echo, one EventThinking per model
+	// call (maxToolRounds+1), the annotation/dice pair per dispatch round,
+	// and the error itself — with slack so the bound, not the count, is
+	// what this test measures.
+	for range 3*maxToolRounds + 8 {
 		ev := nextEvent(t, s)
 		if ev.Kind == tui.EventError {
 			problem = ev
@@ -754,4 +879,308 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestStripChannelTag pins the sanitisation of a leading channel marker in
+// model output: only the very start of the string may change, and only the
+// marker itself.
+func TestStripChannelTag(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"leading IC marker", "[IC] The door swings open.", "The door swings open."},
+		{"leading OOC marker with colon", "[ooc]: Sure.", "Sure."},
+		{"marker after leading whitespace", "  [ic]  The bell tolls.", "The bell tolls."},
+		{"marker without separator", "[ic]The crypt is cold.", "The crypt is cold."},
+		{"interior marker untouched", "You see [ic] scratched into the wall.", "You see [ic] scratched into the wall."},
+		{"markdown link untouched", "[ICest](https://example.test) stays.", "[ICest](https://example.test) stays."},
+		{"marker only", "[OOC]", ""},
+		{"plain text untouched", "The bell tolls twice.", "The bell tolls twice."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripChannelTag(tt.in); got != tt.want {
+				t.Errorf("stripChannelTag(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNarrativeChannelMarkerStripped drives model output carrying inline
+// channel markers through a whole turn: the leading marker never reaches
+// the transcript, interior text and the player's own echo are untouched,
+// and the turn still ends with exactly one EventTurnEnd.
+func TestNarrativeChannelMarkerStripped(t *testing.T) {
+	client := llm.NewScripted(scriptedText("[IC] The door swings open.\nSecond line [ic] stays."))
+	s := newTestSession(t, client)
+
+	const sent = "[ic] I knock twice." // the player's echo keeps its text
+	if err := s.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	events := nextEvents(t, s, 4)
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, tui.EventThinking,
+		tui.EventNarrative, tui.EventTurnEnd,
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if events[0].Markdown != sent {
+		t.Errorf("echo = %q, want the player's text verbatim — sanitisation never touches it", events[0].Markdown)
+	}
+	// One paragraph-flush now: the two soft-wrapped lines are one Markdown
+	// paragraph, so they arrive as a single narrative entry with only the
+	// leading marker stripped.
+	if got := events[2].Markdown; got != "The door swings open.\nSecond line [ic] stays." {
+		t.Errorf("narrative = %q, want leading [IC] stripped and interior [ic] untouched", got)
+	}
+}
+
+// TestMarkerOnlyNarrativeEmitsNothing proves the empty-body handling: a
+// reply that is only a channel marker produces no narrative event, while
+// the turn still ends normally.
+func TestMarkerOnlyNarrativeEmitsNothing(t *testing.T) {
+	client := llm.NewScripted(scriptedText("[OOC]"))
+	s := newTestSession(t, client)
+
+	if err := s.Send(t.Context(), tui.ChannelIC, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	events := nextEvents(t, s, 3)
+	wantKinds := []tui.EventKind{tui.EventNarrative, tui.EventThinking, tui.EventTurnEnd}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+}
+
+// TestTurnEndPersistsChat pins the fix for "quitting erases the chat": a
+// narrative-only turn — no moves, nothing state autosave would catch —
+// lands in chat.json at turn end (before any Close), carrying the exact
+// exchange.
+func TestTurnEndPersistsChat(t *testing.T) {
+	client := llm.NewScripted(scriptedText("The relic sleeps."))
+	s := newTestSession(t, client)
+
+	const sent = "I wake the relic."
+	if err := s.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, s, 4) // echo, thinking, narration, turn end
+
+	data, err := s.store.LoadChat(s.ID())
+	if err != nil {
+		t.Fatalf("LoadChat after turn end (autosave on): %v", err)
+	}
+	var history []llm.Message
+	if err := json.Unmarshal(data, &history); err != nil {
+		t.Fatalf("decode chat.json: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("persisted history = %d messages, want the exchange (2)", len(history))
+	}
+	if history[0].Role != llm.RoleUser || history[0].Content != sent {
+		t.Errorf("first message = %+v, want the player's line", history[0])
+	}
+	if history[1].Role != llm.RoleAssistant || history[1].Content != "The relic sleeps." {
+		t.Errorf("second message = %+v, want the GM's reply", history[1])
+	}
+}
+
+// TestSlashSavePersistsChatWithoutAutosave proves /save carries the
+// conversation to disk when autosave is off: the finished turn writes no
+// chat.json, /save does.
+func TestSlashSavePersistsChatWithoutAutosave(t *testing.T) {
+	s := newTestSession(t, llm.NewScripted(scriptedText("A hush falls.")),
+		func(c *Config) { c.Autosave = false })
+
+	if err := s.Send(t.Context(), tui.ChannelIC, "I listen."); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, s, 4)
+	if _, err := s.store.LoadChat(s.ID()); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("LoadChat without autosave = %v, want ErrNotFound (nothing written yet)", err)
+	}
+
+	if err := s.Send(t.Context(), tui.ChannelIC, "/save"); err != nil {
+		t.Fatalf("Send /save: %v", err)
+	}
+	echo, saved := nextEvent(t, s), nextEvent(t, s)
+	if echo.Markdown != "/save" || saved.Kind != tui.EventSystem ||
+		!strings.Contains(saved.Markdown, "session saved") {
+		t.Fatalf("events = %+v, want the /save echo then a saved system line", []tui.Event{echo, saved})
+	}
+	data, err := s.store.LoadChat(s.ID())
+	if err != nil {
+		t.Fatalf("LoadChat after /save: %v", err)
+	}
+	var history []llm.Message
+	if err := json.Unmarshal(data, &history); err != nil {
+		t.Fatalf("decode chat.json: %v", err)
+	}
+	if len(history) != 2 {
+		t.Errorf("persisted history = %d messages, want the exchange (2)", len(history))
+	}
+}
+
+// TestQuitResumeRoundTrip is the quit→resume contract end to end: a
+// scripted turn, Close, then Resume must restore the conversation (the
+// next model call carries the earlier exchange), replay the recorded play
+// exactly once and in order without duplicating a single log entry, and
+// keep the game state intact.
+func TestQuitResumeRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	client := llm.NewScripted(
+		scriptedText("The door opens."),
+		scriptedText("It closes behind you."),
+	)
+	cfg := func() Config {
+		return Config{
+			Name:        "Round Trip",
+			Seed:        42,
+			Store:       state.NewJSONStore(root, nil),
+			Client:      client,
+			Registry:    tools.NewRegistry(nil),
+			SessionsDir: filepath.Join(root, "sessions"),
+			Autosave:    true,
+		}
+	}
+	first, err := New(cfg())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() }) // idempotent with the explicit Close below
+	const sent = "I open the door."
+	if err := first.Send(t.Context(), tui.ChannelIC, sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, first, 4) // echo, thinking, narration, turn end
+	logBefore, err := first.store.ReadLog(first.ID())
+	if err != nil {
+		t.Fatalf("ReadLog before Close: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	resumed, err := Resume(cfg(), first.ID())
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := resumed.Close(); err != nil {
+			t.Errorf("cleanup Close resumed: %v", err)
+		}
+	})
+
+	// The prior play replays first, in recorded order, exactly once:
+	// the player's echo, then the GM's narration.
+	replay := nextEvents(t, resumed, 2)
+	if replay[0].Kind != tui.EventNarrative || replay[0].Markdown != sent ||
+		replay[1].Kind != tui.EventNarrative || replay[1].Markdown != "The door opens." {
+		t.Fatalf("replay = %+v, want the recorded echo then narration", replay)
+	}
+	// Replay is read-only: the log did not grow by a re-recorded line.
+	logAfter, err := resumed.store.ReadLog(resumed.ID())
+	if err != nil {
+		t.Fatalf("ReadLog after replay: %v", err)
+	}
+	if len(logAfter) != len(logBefore) {
+		t.Errorf("log grew across replay: %d → %d entries, want no duplicates",
+			len(logBefore), len(logAfter))
+	}
+
+	// History is seeded: the next model call carries the earlier exchange.
+	if err := resumed.Send(t.Context(), tui.ChannelIC, "I shut it again."); err != nil {
+		t.Fatalf("Send after resume: %v", err)
+	}
+	nextEvents(t, resumed, 4)
+	req, ok := client.LastRequest()
+	if !ok {
+		t.Fatal("the model was never called after resume")
+	}
+	var sawUser, sawAssistant bool
+	for _, m := range req.Messages {
+		if m.Role == llm.RoleUser && m.Content == sent {
+			sawUser = true
+		}
+		if m.Role == llm.RoleAssistant && m.Content == "The door opens." {
+			sawAssistant = true
+		}
+	}
+	if !sawUser || !sawAssistant {
+		t.Errorf("post-resume request misses the seeded history (user=%v assistant=%v): %+v",
+			sawUser, sawAssistant, req.Messages)
+	}
+
+	// State intact: same identity and session name on both sides.
+	if resumed.ID() != first.ID() {
+		t.Errorf("resumed id = %q, want %q", resumed.ID(), first.ID())
+	}
+	if name := resumed.Metadata().SessionName; name != "Round Trip" {
+		t.Errorf("SessionName = %q, want %q", name, "Round Trip")
+	}
+}
+
+// TestResumeWithoutChatStartsEmptyWithNote covers the recovery path: a
+// corrupt chat.json on resume yields an empty history plus one system
+// event saying so, while the recorded play still replays behind it.
+func TestResumeWithoutChatStartsEmptyWithNote(t *testing.T) {
+	root := t.TempDir()
+	client := llm.NewScripted(scriptedText("A hush falls."))
+	cfg := func() Config {
+		return Config{
+			Name:        "Lost Chat",
+			Seed:        42,
+			Store:       state.NewJSONStore(root, nil),
+			Client:      client,
+			Registry:    tools.NewRegistry(nil),
+			SessionsDir: filepath.Join(root, "sessions"),
+			Autosave:    true,
+		}
+	}
+	first, err := New(cfg())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() }) // idempotent with the explicit Close below
+	if err := first.Send(t.Context(), tui.ChannelIC, "I listen."); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	nextEvents(t, first, 4)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Corrupt the conversation snapshot; the log stays intact.
+	chatPath := filepath.Join(root, "sessions", first.ID(), "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{truncated`), 0o644); err != nil {
+		t.Fatalf("corrupt chat.json: %v", err)
+	}
+	resumed, err := Resume(cfg(), first.ID())
+	if err != nil {
+		t.Fatalf("Resume with corrupt chat: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := resumed.Close(); err != nil {
+			t.Errorf("cleanup Close resumed: %v", err)
+		}
+	})
+	if len(resumed.history) != 0 {
+		t.Errorf("history = %d messages, want empty on a corrupt chat.json", len(resumed.history))
+	}
+	note := nextEvent(t, resumed)
+	if note.Kind != tui.EventSystem || !strings.Contains(note.Markdown, "empty history") {
+		t.Errorf("first event = %+v, want the resume note", note)
+	}
+	echo := nextEvent(t, resumed)
+	if echo.Kind != tui.EventNarrative || echo.Markdown != "I listen." {
+		t.Errorf("second event = %+v, want the replayed echo after the note", echo)
+	}
 }

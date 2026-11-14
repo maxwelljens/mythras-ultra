@@ -61,11 +61,14 @@ func (s *Session) compact() {
 
 // summarise condenses older turns in one Chat call through the same client.
 // An empty or failed reply is an error, so the caller keeps the turns
-// verbatim rather than replacing them with nothing.
+// verbatim rather than replacing them with nothing. The call announces
+// itself with EventThinking like any other model call, still inside the
+// turn — EventTurnEnd follows it.
 func (s *Session) summarise(older []llm.Message) (string, error) {
 	if s.client == nil {
 		return "", ErrNoClient
 	}
+	s.emit(tui.Event{Kind: tui.EventThinking})
 	msgs := make([]llm.Message, 0, len(older)+1)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: summarisationPrompt})
 	msgs = append(msgs, older...)

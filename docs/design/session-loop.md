@@ -28,7 +28,10 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
       `ctrl+m`).
    c. Call `llm.Client.Chat` (or `Stream`) with: system prompt
       (prompts.Assemble: persona + recap + character/world summaries),
-      conversation history, and the registry's `[]llm.ToolSpec`.
+      conversation history, and the registry's `[]llm.ToolSpec`. Each call
+      is announced with `EventThinking` first; the turn ends with exactly
+      one `EventTurnEnd` (success or rollback alike) — the TUI brackets a
+      header throbber on them.
 2. While the response contains tool calls:
    a. Dispatch each `ToolCall` to `tools.Registry` against the live
       `*resolve.State`; every result is `Record`ed in the session log.
@@ -38,11 +41,38 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
    c. Append `RoleTool` messages, re-call the LLM. Bound the loop (32
       rounds, `maxToolRounds`) — on overflow, summarise and stop with an
       `EventError`.
-3. Assistant text: stream as `EventNarrative` deltas; on completion append
-   to history.
+3. Assistant text: stream as `EventNarrative` deltas; a leading `[ic]` /
+   `[ooc]` marker the model wrote inline is stripped before emission (the
+   TUI derives the channel from `Event.Channel` — model output only, never
+   the player's echo); on completion append to history.
 4. OOC channel: same loop but tag the message `[ooc]`; the prompt instructs
    the GM to reply out of character and perform no moves unless the player
    confirms.
+
+## Chat persistence & replay
+
+The conversation and the play text survive the process:
+
+- **History (`chat.json`)** — the session marshals `[]llm.Message` and
+  writes it atomically (`Store.SaveChat`) at every autosaved turn end, on
+  `/save`, and on `Close`. `Resume` unmarshals it into the history before
+  the runner starts; missing or corrupt bytes continue with an empty
+  history plus one system event (the prompt's recaps and summaries still
+  carry the context).
+- **Play lines (`log.jsonl`)** — player echoes (recorded verbatim), GM
+  narrative (after `[ic]`/`[ooc]` marker sanitisation) and error text are
+  recorded as `Kind: "chat"` entries (`state.ChatLine`: channel, player,
+  kind, text). System confirmations, thinking, turn-end, tool
+  annotations and dice are not chat lines: they are transient, and the
+  moves behind them are already in the log. Recording happens inline on
+  the runner goroutine, so chat and move entries interleave in true play
+  order.
+- **Replay** — `Resume` rebuilds the recorded chat lines into events
+  (original order and timestamps) and queues them; the runner delivers
+  the queue before it processes any input. Replay bypasses `emitChat`,
+  so it never re-records — only freshly produced events touch the log.
+  `transcript.md` renders the same interleaving: `**You:** ` prefixed
+  player lines, GM text verbatim, move annotations alongside.
 
 ## Determinism & audit
 

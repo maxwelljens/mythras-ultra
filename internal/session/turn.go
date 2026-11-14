@@ -5,6 +5,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -34,12 +35,49 @@ const (
 	oocTag = "[ooc] "
 )
 
-// run is the session's single runner goroutine: it takes player input in
-// arrival order and processes it one turn at a time, which is what puts the
+// channelTagRe matches a channel marker a model sometimes writes at the
+// very start of its reply ("[IC] The door…", "[ooc]: sure"). It is anchored
+// to the start of the string (after leading whitespace) so a marker inside
+// the prose, or a markdown link such as [ICest](…), is never touched.
+var channelTagRe = regexp.MustCompile(`(?i)^\s*\[(ic|ooc)\]:?`)
+
+// stripChannelTag drops a leading channel marker from model output: the TUI
+// derives the channel from Event.Channel, so an inline marker would only
+// duplicate the interface's own tagging. It is applied to model output
+// only — never to the player's echo.
+func stripChannelTag(text string) string {
+	loc := channelTagRe.FindStringIndex(text)
+	if loc == nil {
+		return text
+	}
+	return strings.TrimLeft(text[loc[1]:], " \t")
+}
+
+// emitNarrative sends one piece of model output to the transcript with the
+// leading channel marker stripped, and records it as a GM chat line (the
+// sanitised text — the log holds what the player saw). A message that is
+// only the marker emits nothing — the marker is dropped, whatever follows
+// it still flows as the next narrative event.
+func (s *Session) emitNarrative(ch tui.Channel, text string) {
+	body := stripChannelTag(text)
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body}, false)
+}
+
+// run is the session's single runner goroutine: it first delivers whatever
+// Resume queued (the replayed play history, before any input — the TUI
+// shows the prior session immediately), then takes player input in arrival
+// order and processes it one turn at a time, which is what puts the
 // player's echo ahead of every event that turn produces. It exits when
 // Close closes quit; the done channel reports that to Close.
 func (s *Session) run() {
 	defer close(s.done)
+	for _, ev := range s.replay {
+		s.emit(ev)
+	}
+	s.replay = nil
 	for {
 		select {
 		case <-s.quit:
@@ -50,17 +88,18 @@ func (s *Session) run() {
 	}
 }
 
-// process echoes the player's text verbatim, then routes it: slash commands
-// run locally instead of through the model, everything else is a model turn
-// on the input's channel (session-loop.md "Turn loop" step 1a–1b).
+// process echoes the player's text verbatim (recording it as a player chat
+// line), then routes it: slash commands run locally instead of through the
+// model, everything else is a model turn on the input's channel
+// (session-loop.md "Turn loop" step 1a–1b).
 func (s *Session) process(in input) {
-	s.emit(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text})
+	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text}, true)
 
 	cmd, err := tui.ParseInput(in.text)
 	if err != nil {
 		// The TUI parses first and shows its own error; this path
 		// covers direct Driver users and unknown commands.
-		s.emit(tui.Event{Kind: tui.EventError, Channel: in.ch, Markdown: err.Error()})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: in.ch, Markdown: err.Error()}, false)
 		return
 	}
 	switch cmd.Kind {
@@ -79,8 +118,8 @@ func (s *Session) process(in input) {
 	case tui.CmdMeta:
 		s.cmdMeta(in.ch)
 	default:
-		s.emit(tui.Event{Kind: tui.EventError, Channel: in.ch,
-			Markdown: "that command is handled by the TUI and never reaches the harness"})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: in.ch,
+			Markdown: "that command is handled by the TUI and never reaches the harness"}, false)
 	}
 }
 
@@ -101,7 +140,7 @@ func rollExpr(text string) string {
 func (s *Session) cmdRoll(ch tui.Channel, expr string) {
 	args, err := json.Marshal(map[string]string{"expr": expr, "reason": "player /roll"})
 	if err != nil {
-		s.emit(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf("encode /roll: %v", err)})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf("encode /roll: %v", err)}, false)
 		return
 	}
 	// A bad expression comes back as a refused result, which the
@@ -109,10 +148,15 @@ func (s *Session) cmdRoll(ch tui.Channel, expr string) {
 	s.runTool(ch, llm.ToolCall{Name: "roll_dice", Args: args})
 }
 
-// cmdSave flushes state.json now (autosave or not) and reports it.
+// cmdSave flushes state.json and the conversation now (autosave or not)
+// and reports it.
 func (s *Session) cmdSave(ch tui.Channel) {
 	if err := s.save(); err != nil {
-		s.emit(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: err.Error()})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: err.Error()}, false)
+		return
+	}
+	if err := s.saveChat(); err != nil {
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: err.Error()}, false)
 		return
 	}
 	s.emit(tui.Event{Kind: tui.EventSystem, Channel: ch,
@@ -148,8 +192,11 @@ type reply struct {
 // until it answers in prose — at most maxToolRounds dispatch rounds. A
 // model failure rolls the whole turn out of history so the player can
 // retry; a tool failure flows back as an IMPOSSIBLE result and never
-// aborts the turn.
+// aborts the turn. The turn is closed by endTurn, so exactly one
+// EventTurnEnd lands after the last event of the turn on every path —
+// success, tool-loop overflow or rollback.
 func (s *Session) runTurn(ch tui.Channel, text string) {
+	defer s.endTurn(ch)
 	rollback := len(s.history)
 	content := text
 	if ch == tui.ChannelOOC {
@@ -185,9 +232,9 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 			// results, and this turn will not produce them: keep the
 			// narration, drop the unanswered calls, stop the loop.
 			s.dropDanglingCalls()
-			s.emit(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
+			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
 				"the model kept calling tools for %d rounds in one turn — stopping here; nudge it to answer in prose",
-				maxToolRounds)})
+				maxToolRounds)}, false)
 			break
 		}
 		rounds++
@@ -196,8 +243,8 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 			payload, merr := json.Marshal(toolRes)
 			body := toolRes.Summary
 			if merr != nil {
-				s.emit(tui.Event{Kind: tui.EventError, Channel: ch,
-					Markdown: fmt.Sprintf("encode result of %q: %v", call.Name, merr)})
+				s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
+					Markdown: fmt.Sprintf("encode result of %q: %v", call.Name, merr)}, false)
 			} else {
 				body = string(payload)
 			}
@@ -210,6 +257,21 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 		}
 	}
 	s.compact()
+}
+
+// endTurn closes one model turn: it persists the conversation to chat.json
+// when autosave is on — the turn just changed it, and narrative-only turns
+// (no moves, nothing for state autosave to catch) would otherwise never
+// reach disk — then emits the EventTurnEnd the TUI brackets its header on.
+// Deferred to runTurn, it runs on every path: a failed turn saves the
+// rolled-back history, so chat.json always holds the last good state.
+func (s *Session) endTurn(ch tui.Channel) {
+	if s.autosave {
+		if err := s.saveChat(); err != nil {
+			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: err.Error()}, false)
+		}
+	}
+	s.emit(tui.Event{Kind: tui.EventTurnEnd, Channel: ch})
 }
 
 // dropDanglingCalls removes unanswered tool calls from the last assistant
@@ -250,9 +312,9 @@ func (s *Session) systemPrompt() (string, error) {
 }
 
 // callModel asks the model for the next message, streaming narration into
-// the transcript as it arrives: each newline-terminated batch (or, for a
-// long line-less passage, each maxNarrativeBatch-sized chunk) becomes one
-// EventNarrative, and the last fragment is flushed when the reply ends. A
+// the transcript as it arrives: each paragraph-terminated batch (or, for a
+// long single-paragraph passage, each maxNarrativeBatch-sized chunk) becomes
+// one EventNarrative, and the last fragment is flushed when the reply ends. A
 // stream that fails before producing anything falls back to a single Chat
 // call — a client may be chat-only — while a stream that fails midway is a
 // model failure the caller rolls back (session-loop.md failure policy).
@@ -260,6 +322,11 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 	if s.client == nil {
 		return reply{}, ErrNoClient
 	}
+	// A model call is in flight — the header throbber shows "thinking"
+	// until the first narrative delta or the turn end. Emitted here rather
+	// than in runTurn so it covers every call, re-invocations included,
+	// and never fires for a session without a client.
+	s.emit(tui.Event{Kind: tui.EventThinking, Channel: ch})
 	var (
 		r       reply
 		got     bool
@@ -268,7 +335,7 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 	)
 	flush := func() {
 		if pending != "" {
-			s.emit(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: pending})
+			s.emitNarrative(ch, pending)
 			pending = ""
 		}
 	}
@@ -278,11 +345,18 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 		case llm.StreamTextDelta:
 			full.WriteString(ev.Text)
 			pending += ev.Text
-			if i := strings.LastIndexByte(pending, '\n'); i >= 0 {
-				// Flush complete lines so each transcript entry is
-				// renderable Markdown; keep the partial tail.
-				s.emit(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: pending[:i+1]})
-				pending = pending[i+1:]
+			if i := strings.Index(pending, "\n\n"); i >= 0 {
+				// Flush at paragraph boundaries, not every newline: an
+				// entry is a complete Markdown paragraph, so the
+				// transcript's "\n\n" join lands exactly one blank line
+				// between paragraphs (line-level flushes rendered as
+				// extra blank lines). Whitespace-only batches (e.g. a
+				// stream opening with "\n\n") are dropped — the join
+				// already supplies the separation.
+				if batch := pending[:i+2]; strings.TrimSpace(batch) != "" {
+					s.emitNarrative(ch, batch)
+				}
+				pending = pending[i+2:]
 			} else if len(pending) >= maxNarrativeBatch {
 				flush()
 			}
@@ -306,9 +380,7 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 		if cerr != nil {
 			return reply{}, fmt.Errorf("chat: %w", cerr)
 		}
-		if resp.Message.Content != "" {
-			s.emit(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: resp.Message.Content})
-		}
+		s.emitNarrative(ch, resp.Message.Content)
 		return reply{text: resp.Message.Content, calls: resp.Message.ToolCalls}, nil
 	default:
 		flush()
@@ -330,11 +402,11 @@ func (s *Session) runTool(ch tui.Channel, call llm.ToolCall) tools.Result {
 	s.mu.Unlock()
 	if err != nil {
 		res = tools.Result{OK: false, Summary: "IMPOSSIBLE: harness fault: " + err.Error()}
-		s.emit(tui.Event{Kind: tui.EventError, Channel: ch,
-			Markdown: fmt.Sprintf("tool %s: harness fault: %v", call.Name, err)})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
+			Markdown: fmt.Sprintf("tool %s: harness fault: %v", call.Name, err)}, false)
 	}
 	if rerr := s.record(seq, call, res, err); rerr != nil {
-		s.emit(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: rerr.Error()})
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: rerr.Error()}, false)
 	}
 	s.emit(tui.Event{
 		Kind:    tui.EventToolAnnotation,
@@ -351,7 +423,7 @@ func (s *Session) runTool(ch tui.Channel, call llm.ToolCall) tools.Result {
 	}
 	if res.OK && s.autosave {
 		if serr := s.save(); serr != nil {
-			s.emit(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: serr.Error()})
+			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: serr.Error()}, false)
 		}
 	}
 	return res
@@ -365,8 +437,8 @@ func (s *Session) failTurn(ch tui.Channel, rollback int, err error) {
 	if rollback <= len(s.history) {
 		s.history = s.history[:rollback]
 	}
-	s.emit(tui.Event{Kind: tui.EventError, Channel: ch,
-		Markdown: fmt.Sprintf("turn failed: %v (the turn was rolled back — try again)", err)})
+	s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
+		Markdown: fmt.Sprintf("turn failed: %v (the turn was rolled back — try again)", err)}, false)
 }
 
 // diceEvents projects a tool result's audit rolls onto the theatre: dice

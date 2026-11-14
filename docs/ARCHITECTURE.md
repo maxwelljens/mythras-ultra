@@ -146,11 +146,15 @@ test surface.
   - `state.json` — complete game state (schema-versioned), written atomically
     (temp file + rename) after each accepted move; keeps last N snapshots.
   - `log.jsonl` — append-only audit log: every move, roll, tool call, message.
+  - `chat.json` — the conversation snapshot (`[]llm.Message`, caller-marshalled
+    bytes), written atomically at turn end, `/save` and `Close`; seeds the
+    history on resume.
   - `transcript.md` — rendered play log (regenerable from log.jsonl).
-- `Store` interface: `Save/Load/List/Delete` plus `Record`/`ReadLog` for
-  `log.jsonl`; JSON impl now, bbolt can slot in later without touching
-  callers. Autosave hook after each move.
-- Everything needed to resume a game must be in `state.json` — no hidden state.
+- `Store` interface: `Save/Load/List/Delete`, `Record`/`ReadLog` for
+  `log.jsonl`, `SaveChat/LoadChat` for `chat.json`; JSON impl now, bbolt
+  can slot in later without touching callers. Autosave hook after each move.
+- Everything needed to resume a game must be on disk under the session
+  directory — no hidden state.
 
 ## 6. Harness
 

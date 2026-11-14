@@ -28,7 +28,8 @@ Bubbletea TUI — chat, animated dice, character HUD, and session persistence.
   `parchment`, `terminal`) with adaptive light/dark.
 - Session persistence (`internal/state`, under `~/.local/share/myul`) —
   atomic `state.json` with rotating snapshots, append-only `log.jsonl`,
-  regenerable `transcript.md`; sessions resume from the persisted seed.
+  atomic `chat.json` (the conversation), regenerable `transcript.md`;
+  sessions resume with the persisted seed, conversation and play history.
 - Offline test suite — seeded unit tests plus scripted mock sessions
   (`internal/harness/testdata/mocksession/`) that exercise every registered
   tool.
