@@ -38,14 +38,14 @@ Bubbletea TUI — chat, animated dice, character HUD, and session persistence.
 | Command | Description |
 |---|---|
 | `myul` | Session picker (or resume the newest session; `--no-tui` headless). |
-| `myul new [name]` | Create a session and play it (`--seed`, `--model`, `--provider`, `--no-tui`). |
+| `myul new [name]` | Create a session and play it (`--seed`, `--model`, `--provider`, `--skip-llm`, `--no-tui`). |
 | `myul resume [session-id]` | Resume a saved session; picker when the id is omitted. |
 | `myul sessions` | List saved sessions, newest first (`--json`). |
 | `myul delete <session-id>` | Delete a session and its log (`--force` skips confirmation). |
 | `myul export <session-id>` | Write the Markdown play log (`--out FILE`, `--state` for state JSON). |
 | `myul config path` | Print the resolved configuration file path. |
 | `myul config init` | Write a commented default config file (`--force` overwrites). |
-| `myul doctor` | Validate the config and probe the decision model. |
+| `myul doctor` | Validate the config and probe the LLM API key and decision model. |
 | `myul version` | Print version and build date. |
 
 `--config PATH` is accepted by every command.
