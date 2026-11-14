@@ -78,7 +78,8 @@ type GameConfig struct {
 
 // UIConfig is the [ui] section.
 type UIConfig struct {
-	// Theme is the built-in palette name (mythras, obsidian, parchment).
+	// Theme is the built-in palette name (mythras, obsidian, parchment,
+	// terminal).
 	Theme string `mapstructure:"theme"`
 	// DiceAnimation enables the dice-theatre animation; disable it for
 	// accessibility (ARCHITECTURE §7).
