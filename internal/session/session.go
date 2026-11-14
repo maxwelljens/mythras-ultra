@@ -41,6 +41,11 @@ const (
 	// keeps verbatim when Config.HistoryWindow is not set (session-loop.md,
 	// "Context compaction").
 	defaultHistoryWindow = 32
+	// defaultMaxToolRounds bounds one turn's tool-call loop when
+	// Config.MaxToolRounds is not set (0): after this many dispatch
+	// rounds the next model reply is reported as an EventError
+	// (session-loop.md: "Bound the loop ... stop with an EventError").
+	defaultMaxToolRounds = 200
 	// inputQueue bounds how many player messages may wait for the runner
 	// before Send blocks (the TUI reads its events continuously, so the
 	// queue only fills while a turn runs long).
@@ -51,11 +56,22 @@ const (
 	eventBuffer = 64
 )
 
-// input is one queued player message: the channel it was typed on and the
-// text exactly as typed (echoed verbatim before the turn runs).
+// input is one queued runner item: a player message (ch + text, echoed
+// verbatim before the turn runs) or a local command (cmd + args, executed
+// without the model). Exactly one of text/cmd is set.
 type input struct {
 	ch   tui.Channel
 	text string
+	cmd  string   // command name for a Driver.Command item; "" for a message
+	args []string // command arguments
+}
+
+// sessionMeta is what meta.json holds: the session's small UI-level
+// preferences. The store treats the bytes as opaque (like chat.json), so
+// the shape is owned here.
+type sessionMeta struct {
+	// Channel is the IC/OOC label of the last-used mode ("IC"/"OOC").
+	Channel string `json:"channel"`
 }
 
 // Config wires a session's collaborators. The command layer builds one; the
@@ -96,6 +112,9 @@ type Config struct {
 	SessionsDir string
 	// Autosave saves state.json after each accepted move.
 	Autosave bool
+	// MaxToolRounds bounds one turn's tool-call loop; zero or negative
+	// means defaultMaxToolRounds (config game.max_tool_rounds).
+	MaxToolRounds int
 	// HistoryWindow is how many conversation messages compaction keeps
 	// verbatim; zero or negative means defaultHistoryWindow.
 	HistoryWindow int
@@ -121,8 +140,12 @@ func (cfg Config) build(st *resolve.State) *Session {
 	if window <= 0 {
 		window = defaultHistoryWindow
 	}
+	rounds := cfg.MaxToolRounds
+	if rounds <= 0 {
+		rounds = defaultMaxToolRounds
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Session{
+	s := &Session{
 		state:       st,
 		store:       cfg.Store,
 		client:      cfg.Client,
@@ -132,6 +155,7 @@ func (cfg Config) build(st *resolve.State) *Session {
 		sessionsDir: cfg.SessionsDir,
 		autosave:    cfg.Autosave,
 		window:      window,
+		maxRounds:   rounds,
 		model:       cfg.ModelName,
 		events:      make(chan tui.Event, eventBuffer),
 		inputs:      make(chan input, inputQueue),
@@ -140,6 +164,8 @@ func (cfg Config) build(st *resolve.State) *Session {
 		quit:        make(chan struct{}),
 		done:        make(chan struct{}),
 	}
+	s.loadChannel()
+	return s
 }
 
 // Session is one play session and its implementation of [tui.Driver]. The
@@ -155,8 +181,8 @@ type Session struct {
 	client llm.Client
 	// registry dispatches the GM tools against state.
 	registry *tools.Registry
-	// decision is the optional decision model, kept for /meta; the
-	// registry was built with the same pointer.
+	// decision is the optional decision model, kept for the meta
+	// command; the registry was built with the same pointer.
 	decision *decide.Client
 	// overrides selects the system prompt template.
 	overrides prompts.Overrides
@@ -182,8 +208,18 @@ type Session struct {
 	autosave bool
 	// window is the compaction window in messages.
 	window int
+	// maxRounds is the per-turn tool-round bound (Config.MaxToolRounds,
+	// defaultMaxToolRounds when unset).
+	maxRounds int
 	// model labels the language model in metadata (/meta).
 	model string
+
+	// chanMu guards lastChannel: the TUI goroutine writes it through
+	// SetChannel (and Send) while the command layer and tests read it.
+	chanMu sync.Mutex
+	// lastChannel is the IC/OOC mode last in use: seeded from meta.json at
+	// construction and rewritten there on every change (SetChannel).
+	lastChannel tui.Channel
 
 	// mu guards state reads from the TUI against dispatches from the
 	// runner; it is never held across a model call or an event send.
@@ -227,7 +263,7 @@ func New(cfg Config) (*Session, error) {
 // encounter pointer identity), and the RNG stream picks up exactly where
 // the last process stopped — Resume never reseeds. The conversation
 // history resumes from chat.json (written at every autosaved turn end, on
-// /save and on Close); when that file is missing or corrupt the turn loop
+// the save command and on Close); when that file is missing or corrupt the turn loop
 // starts with an empty history and one system event says so — continuity
 // then comes from the system prompt's recap and summaries, rebuilt from
 // state on every turn. The play recorded in log.jsonl is queued for
@@ -255,6 +291,35 @@ func Resume(cfg Config, id string) (*Session, error) {
 
 // ID returns the session identifier state.json is keyed by.
 func (s *Session) ID() string { return s.state.ID }
+
+// LastChannel reports the IC/OOC mode this session last used, so the TUI
+// can reopen on it (tui.Options.InitialChannel). It is seeded from meta.json
+// at construction and updated by [Session.SetChannel] and [Session.Send];
+// safe to call from any goroutine.
+func (s *Session) LastChannel() tui.Channel {
+	s.chanMu.Lock()
+	defer s.chanMu.Unlock()
+	return s.lastChannel
+}
+
+// loadChannel seeds lastChannel from meta.json inside build (New and
+// Resume), before the runner starts. The channel is a UI hint, not game
+// state: an absent, corrupt or unreadable meta.json degrades to the
+// in-character channel instead of failing construction — LoadMeta maps
+// absence and corruption to ErrNotFound, and the mode is written again on
+// the next switch.
+func (s *Session) loadChannel() {
+	data, err := s.store.LoadMeta(s.state.ID)
+	if err != nil {
+		return // no usable hint: the ChannelIC default stands
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return // hand-edited meta.json reads as the default channel
+	}
+	// The same label mapping replay uses: anything but "OOC" is IC.
+	s.lastChannel = replayChannel(meta.Channel)
+}
 
 // start launches the runner goroutine.
 func (s *Session) start() { go s.run() }

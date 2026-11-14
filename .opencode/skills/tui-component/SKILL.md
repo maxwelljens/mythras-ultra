@@ -33,8 +33,9 @@ fed by the 16-colour theme system (ARCHITECTURE.md §7).
    honouring the user's ANSI 16, adaptive to the light/dark colour profile
    (`[ui] colour mode`, config). No hard-coded hex outside the theme files.
 6. **No game logic**: dice animation replays an existing roll's audit; the
-   HUD/metadata panel reads state; slash commands (`/roll`, `/save`, ...)
-   dispatch to harness/engine paths rather than computing outcomes locally.
+   HUD/metadata panel reads state; commands (`save`, `recap`, `roll`,
+   `meta`) travel over `Driver.Command` to harness/engine paths instead of
+   being computed locally — typed input is always a chat message.
 7. **Accessibility**: honour `ui.dice_animation` (off = instant result
    banners) and `metadata_default`; respect the terminal colour profile.
 8. **Tests**: unit-test `Update` and `View` with synthetic messages and a

@@ -4,10 +4,11 @@ package session
 
 // Offline session tests: llm.ScriptedClient replays canned turns, so every
 // assertion here runs without a network. They pin the driver contract
-// (session-loop.md): verbatim echo first, annotation before dice, slash
-// commands handled locally, OOC tagging, IMPOSSIBLE results flowing back to
-// the model, failure rollback, compaction, close semantics, RNG continuity
-// across Resume and the metadata snapshot.
+// (session-loop.md): verbatim echo first, annotation before dice, commands
+// through Driver.Command handled locally (never parsed from prose), OOC
+// tagging, IMPOSSIBLE results flowing back to the model, failure rollback,
+// compaction, close semantics, RNG continuity across Resume and the
+// metadata snapshot.
 
 import (
 	"context"
@@ -99,10 +100,12 @@ func kindsOf(events []tui.Event) []tui.EventKind {
 
 // drainReplay reads exactly the events Resume replayed — one per chat line
 // log.jsonl held when the session was constructed (plus any resume note) —
-// so a test can start from the fresh stream the runner produces afterwards.
+// and returns them, so a test can assert on the replayed play (reading the
+// session's internal queue would race the runner, which clears it once
+// delivered) or start from the fresh stream the runner produces afterwards.
 // The count comes from the log itself: replay is read-only, so nothing
 // records while it drains.
-func drainReplay(t *testing.T, s *Session) {
+func drainReplay(t *testing.T, s *Session) []tui.Event {
 	t.Helper()
 	entries, err := s.store.ReadLog(s.ID())
 	if err != nil {
@@ -114,9 +117,11 @@ func drainReplay(t *testing.T, s *Session) {
 			n++
 		}
 	}
+	events := make([]tui.Event, 0, n)
 	for range n {
-		nextEvent(t, s)
+		events = append(events, nextEvent(t, s))
 	}
+	return events
 }
 
 // mustApply runs one engine move against the session's live state (the
@@ -144,18 +149,19 @@ func toolTurn(call llm.ToolCall) llm.ScriptedTurn {
 	}}
 }
 
-// rollTotal sends /roll and returns the dice banner's total.
+// rollTotal runs Command("roll", "1d100") and returns the dice banner's
+// total (commands carry no player text, so no echo precedes them).
 func rollTotal(t *testing.T, s *Session) int {
 	t.Helper()
-	if err := s.Send(t.Context(), tui.ChannelIC, "/roll 1d100"); err != nil {
-		t.Fatalf("Send /roll: %v", err)
+	if err := s.Command("roll", "1d100"); err != nil {
+		t.Fatalf("Command roll: %v", err)
 	}
-	for _, ev := range nextEvents(t, s, 3) {
+	for _, ev := range nextEvents(t, s, 2) {
 		if ev.Kind == tui.EventDice && ev.Dice != nil {
 			return ev.Dice.Total
 		}
 	}
-	t.Fatal("/roll produced no dice event")
+	t.Fatal("roll produced no dice event")
 	return 0
 }
 
@@ -280,23 +286,21 @@ func TestTurnEventOrder(t *testing.T) {
 	}
 }
 
-// TestSlashRoll checks /roll locally: it runs the roll_dice move (no model
-// call), echoes first and lands as one dice event, and is audited.
-func TestSlashRoll(t *testing.T) {
+// TestCommandRoll checks Command("roll", …) locally: it runs the roll_dice
+// move (no model call), emits no echo (commands carry no player text) and
+// lands as annotation + one dice event, and it is audited.
+func TestCommandRoll(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted()) // no scripted turns: the model must never be called
-	if err := s.Send(t.Context(), tui.ChannelIC, "/roll 2d6+1"); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := s.Command("roll", "2d6+1"); err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	events := nextEvents(t, s, 3) // echo, annotation, dice
-	if ev := events[0]; ev.Kind != tui.EventNarrative || ev.Markdown != "/roll 2d6+1" {
-		t.Errorf("first event = %+v, want the verbatim /roll echo", ev)
-	}
-	if ev := events[1]; ev.Kind != tui.EventToolAnnotation || ev.Annotation == nil ||
+	events := nextEvents(t, s, 2) // annotation, dice
+	if ev := events[0]; ev.Kind != tui.EventToolAnnotation || ev.Annotation == nil ||
 		ev.Annotation.ToolName != "roll_dice" || !ev.Annotation.OK {
-		t.Errorf("second event = %+v, want an OK roll_dice annotation", ev)
+		t.Errorf("first event = %+v, want an OK roll_dice annotation", ev)
 	}
-	if ev := events[2]; ev.Kind != tui.EventDice || ev.Dice == nil {
-		t.Fatalf("third event = %+v, want a dice event", ev)
+	if ev := events[1]; ev.Kind != tui.EventDice || ev.Dice == nil {
+		t.Fatalf("second event = %+v, want a dice event", ev)
 	} else {
 		sum := 0
 		for _, d := range ev.Dice.Dice {
@@ -308,91 +312,140 @@ func TestSlashRoll(t *testing.T) {
 		}
 	}
 	if seq := s.state.EventSeq; seq != 1 {
-		t.Errorf("EventSeq = %d, want 1 — /roll must run as a move", seq)
+		t.Errorf("EventSeq = %d, want 1 — a roll must run as a move", seq)
 	}
 	entries, err := s.store.ReadLog(s.ID())
 	if err != nil {
 		t.Fatalf("ReadLog: %v", err)
 	}
-	if len(entries) != 3 || entries[1].Kind != "chat" ||
-		entries[1].Chat == nil || !entries[1].Chat.Player ||
-		entries[2].Kind != "roll_dice" {
-		t.Fatalf("log entries = %v, want the player's /roll echo then a roll_dice entry", entries)
+	if len(entries) != 2 || entries[0].Kind != "session" ||
+		entries[1].Kind != "roll_dice" {
+		t.Fatalf("log entries = %v, want the session start then a roll_dice entry (no chat echo)", entries)
 	}
 }
 
-// TestSlashSavePersists proves /save flushes a state change autosave is
-// configured not to touch: the loaded state must carry the move.
-func TestSlashSavePersists(t *testing.T) {
+// TestCommandRollNeedsExpression covers the argument edge: roll without an
+// expression is an error line, not a failed dispatch.
+func TestCommandRollNeedsExpression(t *testing.T) {
+	s := newTestSession(t, llm.NewScripted())
+	if err := s.Command("roll"); err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	problem := nextEvent(t, s)
+	if problem.Kind != tui.EventError ||
+		!strings.Contains(problem.Markdown, "expression") ||
+		!strings.Contains(problem.Markdown, "commands") {
+		t.Errorf("event = %+v, want an error naming the missing expression and the commands", problem)
+	}
+}
+
+// TestCommandSavePersists proves Command("save") flushes a state change
+// autosave is configured not to touch: the loaded state must carry the
+// move.
+func TestCommandSavePersists(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted(), func(c *Config) { c.Autosave = false })
 	mustApply(t, s.state, resolve.RollDice{Expr: "1d6", Reason: "unsaved omen"})
 
-	if err := s.Send(t.Context(), tui.ChannelIC, "/save"); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := s.Command("save"); err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	echo, saved := nextEvent(t, s), nextEvent(t, s)
-	if echo.Kind != tui.EventNarrative || echo.Markdown != "/save" {
-		t.Errorf("first event = %+v, want the verbatim /save echo", echo)
-	}
+	saved := nextEvent(t, s) // no echo: commands carry no player text
 	if saved.Kind != tui.EventSystem || !strings.Contains(saved.Markdown, "session saved") {
-		t.Fatalf("second event = %+v, want a saved system line", saved)
+		t.Fatalf("event = %+v, want a saved system line", saved)
 	}
 	loaded, err := s.store.Load(s.ID())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if loaded.EventSeq != 1 {
-		t.Errorf("persisted EventSeq = %d, want 1 — /save must flush the pending move", loaded.EventSeq)
+		t.Errorf("persisted EventSeq = %d, want 1 — save must flush the pending move", loaded.EventSeq)
 	}
 }
 
-// TestSlashRecap returns the stored end-of-session recaps as a system line.
-func TestSlashRecap(t *testing.T) {
+// TestCommandRecap returns the stored end-of-session recaps as a system line.
+func TestCommandRecap(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted())
 	mustApply(t, s.state, resolve.EndRecap{Summary: "The ferryman lied about the crossing."})
 
-	if err := s.Send(t.Context(), tui.ChannelIC, "/recap"); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := s.Command("recap"); err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	echo, recap := nextEvent(t, s), nextEvent(t, s)
-	if echo.Markdown != "/recap" {
-		t.Errorf("first event = %+v, want the verbatim /recap echo", echo)
-	}
+	recap := nextEvent(t, s)
 	if recap.Kind != tui.EventSystem || !strings.Contains(recap.Markdown, "ferryman lied") {
-		t.Errorf("second event = %+v, want the stored recap", recap)
+		t.Errorf("event = %+v, want the stored recap", recap)
 	}
 }
 
-// TestSlashMeta dumps the panel snapshot as a system line.
-func TestSlashMeta(t *testing.T) {
+// TestCommandMeta dumps the panel snapshot as a system line.
+func TestCommandMeta(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted())
-	if err := s.Send(t.Context(), tui.ChannelIC, "/meta"); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := s.Command("meta"); err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	echo, dump := nextEvent(t, s), nextEvent(t, s)
-	if echo.Markdown != "/meta" {
-		t.Errorf("first event = %+v, want the verbatim /meta echo", echo)
-	}
+	dump := nextEvent(t, s)
 	if dump.Kind != tui.EventSystem ||
 		!strings.Contains(dump.Markdown, "session: Test Session") ||
 		!strings.Contains(dump.Markdown, "decision model: disabled") {
-		t.Errorf("second event = %+v, want the metadata dump", dump)
+		t.Errorf("event = %+v, want the metadata dump", dump)
 	}
 }
 
-// TestUnknownSlashCommand rejects commands the harness does not handle
-// with an error line listing the usage.
-func TestUnknownSlashCommand(t *testing.T) {
+// TestCommandUnknown rejects commands the harness does not handle with an
+// error line listing the known ones.
+func TestCommandUnknown(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted())
-	if err := s.Send(t.Context(), tui.ChannelIC, "/frobnicate"); err != nil {
+	if err := s.Command("frobnicate"); err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	problem := nextEvent(t, s)
+	if problem.Kind != tui.EventError || !strings.Contains(problem.Markdown, "unknown command") {
+		t.Errorf("event = %+v, want an unknown-command error", problem)
+	}
+	for _, name := range sessionCommands {
+		if !strings.Contains(problem.Markdown, name) {
+			t.Errorf("error should list %q: %s", name, problem.Markdown)
+		}
+	}
+}
+
+// TestSlashProseReachesModel pins the end of slash-command parsing: prose
+// that looks like a command is a chat message — it is echoed, sent to the
+// scripted model as the user text, and no local command runs for it.
+func TestSlashProseReachesModel(t *testing.T) {
+	client := llm.NewScripted(scriptedText("You save your own progress — nothing to do here."))
+	s := newTestSession(t, client)
+
+	if err := s.Send(t.Context(), tui.ChannelIC, "/save"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	echo, problem := nextEvent(t, s), nextEvent(t, s)
-	if echo.Markdown != "/frobnicate" {
-		t.Errorf("first event = %+v, want the verbatim echo", echo)
+	events := nextEvents(t, s, 4)
+	wantKinds := []tui.EventKind{
+		tui.EventNarrative, // the verbatim echo
+		tui.EventThinking,
+		tui.EventNarrative, // the GM's reply
+		tui.EventTurnEnd,
 	}
-	if problem.Kind != tui.EventError || !strings.Contains(problem.Markdown, "commands") {
-		t.Errorf("second event = %+v, want an error listing the commands", problem)
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Fatalf("event %d = %v, want %v (sequence: %v)", i, events[i].Kind, want, kindsOf(events))
+		}
+	}
+	if events[0].Markdown != "/save" {
+		t.Errorf("echo = %q, want the prose verbatim", events[0].Markdown)
+	}
+	req, ok := client.LastRequest()
+	if !ok {
+		t.Fatal("the model was never called")
+	}
+	user := req.Messages[len(req.Messages)-1]
+	if user.Role != llm.RoleUser || user.Content != "/save" {
+		t.Errorf("last message = %+v, want the slash-looking prose as RoleUser text", user)
+	}
+	// No local save ran: nothing was written by the message itself.
+	for _, ev := range events {
+		if ev.Kind == tui.EventSystem && strings.Contains(ev.Markdown, "session saved") {
+			t.Errorf("/save prose must not run the save command: %+v", ev)
+		}
 	}
 }
 
@@ -561,10 +614,10 @@ func TestCompactionWindowsHistory(t *testing.T) {
 	// The summary call runs at the end of turn two; a local command runs
 	// strictly after it (one runner goroutine), so its events prove
 	// compaction finished before the assertions below.
-	if err := s.Send(t.Context(), tui.ChannelIC, "/meta"); err != nil {
-		t.Fatalf("Send /meta: %v", err)
+	if err := s.Command("meta"); err != nil {
+		t.Fatalf("Command meta: %v", err)
 	}
-	nextEvents(t, s, 2)
+	nextEvents(t, s, 1)
 
 	if len(s.history) != 3 {
 		t.Fatalf("history = %d messages, want summary + the last window (3)", len(s.history))
@@ -592,10 +645,10 @@ func TestCompactionWindowsHistory(t *testing.T) {
 // refuses input afterwards.
 func TestCloseIsIdempotentWritesTranscript(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted())
-	if err := s.Send(t.Context(), tui.ChannelIC, "/roll 1d4"); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := s.Command("roll", "1d4"); err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	nextEvents(t, s, 3)
+	nextEvents(t, s, 2) // annotation, dice
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -664,7 +717,7 @@ func TestResumeContinuesRNGStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	drainReplay(t, continued) // the recorded /roll echo replays first
+	drainReplay(t, continued) // the roll recorded no chat lines: replay yields nothing
 	gotSecond := rollTotal(t, continued)
 	if err := continued.Close(); err != nil {
 		t.Fatalf("Close resumed: %v", err)
@@ -674,6 +727,81 @@ func TestResumeContinuesRNGStream(t *testing.T) {
 		t.Errorf("interrupted rolls = %d, %d; uninterrupted reference = %d, %d — "+
 			"Resume must continue the persisted RNG stream",
 			gotFirst, gotSecond, wantFirst, wantSecond)
+	}
+}
+
+// TestMetadataSheet pins the sheet block behind the palette's Character
+// sheet overlay: the same PC lookup as the vitals builder, the fixed
+// characteristic order, the derived readouts as the engine reports them,
+// skills sorted value-descending then name — and the zero value while no
+// player character exists yet.
+func TestMetadataSheet(t *testing.T) {
+	s := newTestSession(t, llm.NewScripted())
+	st := s.state
+
+	// No character yet: the sheet is the zero value (the TUI shows its
+	// empty state).
+	if sh := s.Metadata().Sheet; sh.Name != "" || len(sh.Characteristics) != 0 {
+		t.Fatalf("sheet without a PC = %+v, want the zero value", sh)
+	}
+
+	mustApply(t, st, resolve.CreateCharacter{
+		Name: "Ynara Vex", PC: true, Culture: "Civilised", Career: "Hunter",
+		Age: 27,
+	})
+	// Concept is free text the creation move does not carry; set it the
+	// way the GM's character tooling would (runner idle: safe to write).
+	pc := st.Characters["pc-1"]
+	if pc == nil {
+		t.Fatal("pc-1 missing from the prepared state")
+	}
+	pc.Concept = "a hunter with a debt"
+
+	sh := s.Metadata().Sheet
+	if sh.Name != "Ynara Vex" || sh.Culture != "Civilised" || sh.Career != "Hunter" {
+		t.Errorf("identity = %q/%q/%q, want the PC's", sh.Name, sh.Culture, sh.Career)
+	}
+	if sh.Age != "27" || !strings.Contains(sh.Concept, "debt") {
+		t.Errorf("age/concept = %q/%q, want %q/%q", sh.Age, sh.Concept, "27", "a hunter with a debt")
+	}
+
+	wantChars := []string{"STR", "CON", "SIZ", "DEX", "INT", "POW", "CHA"}
+	if len(sh.Characteristics) != len(wantChars) {
+		t.Fatalf("characteristics = %+v, want the fixed %d", sh.Characteristics, len(wantChars))
+	}
+	for i, name := range wantChars {
+		if sh.Characteristics[i].Name != name {
+			t.Errorf("characteristic %d = %q, want %q (fixed order)", i, sh.Characteristics[i].Name, name)
+		}
+		if sh.Characteristics[i].Value == "" {
+			t.Errorf("%s has no value", name)
+		}
+	}
+
+	// Derived readouts in the documented order, as the engine reports them.
+	wantDerived := []string{"HP", "Damage Modifier", "Power Points", "Luck", "Experience Bonus"}
+	if len(sh.Derived) != len(wantDerived) {
+		t.Fatalf("derived = %+v, want %d rows", sh.Derived, len(wantDerived))
+	}
+	for i, name := range wantDerived {
+		if sh.Derived[i].Name != name {
+			t.Errorf("derived row %d = %q, want %q", i, sh.Derived[i].Name, name)
+		}
+	}
+	if len(sh.Skills) == 0 {
+		t.Fatal("culture/career should have granted skills")
+	}
+	for i := 1; i < len(sh.Skills); i++ {
+		prev, cur := sh.Skills[i-1], sh.Skills[i]
+		prevVal, _ := strconv.Atoi(strings.TrimSuffix(prev.Value, "%"))
+		curVal, _ := strconv.Atoi(strings.TrimSuffix(cur.Value, "%"))
+		if prevVal < curVal || (prevVal == curVal && prev.Name >= cur.Name) {
+			t.Errorf("skills out of order at %d: %s %s then %s %s (value desc, then name)",
+				i, prev.Name, prev.Value, cur.Name, cur.Value)
+		}
+	}
+	if len(sh.Locations) == 0 {
+		t.Error("hit locations missing from the sheet")
 	}
 }
 
@@ -749,29 +877,34 @@ func TestMetadataSnapshot(t *testing.T) {
 }
 
 // TestToolLoopBound stops a model that never stops calling tools: the loop
-// yields after maxToolRounds dispatch rounds with an error line, the
-// history never ends on unanswered tool calls, and the state kept every
-// accepted move.
+// yields after the configured number of dispatch rounds with an error line
+// naming that cap, the history never ends on unanswered tool calls, and
+// the state kept every accepted move. The cap is configured small so the
+// test stays about the bound, not the count.
 func TestToolLoopBound(t *testing.T) {
+	const cap = 3
 	call := llm.ToolCall{ID: "t", Name: "roll_dice", Args: json.RawMessage(`{"expr":"1d6","reason":"bound"}`)}
-	turns := make([]llm.ScriptedTurn, maxToolRounds+1)
+	turns := make([]llm.ScriptedTurn, cap+1)
 	for i := range turns {
 		turns[i] = toolTurn(call)
 	}
 	client := llm.NewScripted(turns...)
 	// A generous window keeps this test about the bound: compaction would
 	// spend one more scripted turn summarising 60+ messages.
-	s := newTestSession(t, client, func(c *Config) { c.HistoryWindow = 1000 })
+	s := newTestSession(t, client, func(c *Config) {
+		c.HistoryWindow = 1000
+		c.MaxToolRounds = cap
+	})
 
 	if err := s.Send(t.Context(), tui.ChannelIC, "keep rolling"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	var problem tui.Event
 	// The run-up to the bound error: the echo, one EventThinking per model
-	// call (maxToolRounds+1), the annotation/dice pair per dispatch round,
-	// and the error itself — with slack so the bound, not the count, is
-	// what this test measures.
-	for range 3*maxToolRounds + 8 {
+	// call (cap+1), the annotation/dice pair per dispatch round, and the
+	// error itself — with slack so the bound, not the count, is what this
+	// test measures.
+	for range 3*cap + 8 {
 		ev := nextEvent(t, s)
 		if ev.Kind == tui.EventError {
 			problem = ev
@@ -781,18 +914,46 @@ func TestToolLoopBound(t *testing.T) {
 	if problem.Markdown == "" {
 		t.Fatal("no bound error arrived for an endless tool loop")
 	}
-	if !strings.Contains(problem.Markdown, strconv.Itoa(maxToolRounds)) {
-		t.Errorf("error = %q, want it to name the %d-round bound", problem.Markdown, maxToolRounds)
+	if !strings.Contains(problem.Markdown, strconv.Itoa(cap)) {
+		t.Errorf("error = %q, want it to name the configured %d-round cap", problem.Markdown, cap)
 	}
-	if got := len(client.Requests()); got != maxToolRounds+1 {
-		t.Errorf("model calls = %d, want %d (bounded loop)", got, maxToolRounds+1)
+	if got := len(client.Requests()); got != cap+1 {
+		t.Errorf("model calls = %d, want %d (bounded loop)", got, cap+1)
 	}
-	if seq := s.state.EventSeq; seq != maxToolRounds {
-		t.Errorf("EventSeq = %d, want %d accepted rolls", seq, maxToolRounds)
+	if seq := s.state.EventSeq; seq != cap {
+		t.Errorf("EventSeq = %d, want %d accepted rolls", seq, cap)
 	}
 	if last := s.history[len(s.history)-1]; len(last.ToolCalls) > 0 {
 		t.Errorf("history ends with unanswered tool calls: %+v", last)
 	}
+}
+
+// TestMaxToolRounds pins how Config.MaxToolRounds becomes the loop bound:
+// an unset (zero) Config falls back to defaultMaxToolRounds — the same
+// value config.DefaultConfig ships — and an explicit value is used as-is.
+// The cap-hit error message itself is TestToolLoopBound.
+func TestMaxToolRounds(t *testing.T) {
+	t.Run("unset falls back to the default", func(t *testing.T) {
+		s := newTestSession(t, llm.NewScripted())
+		if s.maxRounds != defaultMaxToolRounds {
+			t.Errorf("maxRounds = %d, want the default %d", s.maxRounds, defaultMaxToolRounds)
+		}
+		if s.maxRounds != 200 {
+			t.Errorf("default = %d, want 200 (config game.max_tool_rounds)", s.maxRounds)
+		}
+	})
+	t.Run("explicit zero falls back", func(t *testing.T) {
+		s := newTestSession(t, llm.NewScripted(), func(c *Config) { c.MaxToolRounds = 0 })
+		if s.maxRounds != defaultMaxToolRounds {
+			t.Errorf("maxRounds = %d, want the default %d", s.maxRounds, defaultMaxToolRounds)
+		}
+	})
+	t.Run("configured", func(t *testing.T) {
+		s := newTestSession(t, llm.NewScripted(), func(c *Config) { c.MaxToolRounds = 7 })
+		if s.maxRounds != 7 {
+			t.Errorf("maxRounds = %d, want 7", s.maxRounds)
+		}
+	})
 }
 
 // blockingClient is an llm.Client whose model call hangs until its context
@@ -993,10 +1154,10 @@ func TestTurnEndPersistsChat(t *testing.T) {
 	}
 }
 
-// TestSlashSavePersistsChatWithoutAutosave proves /save carries the
-// conversation to disk when autosave is off: the finished turn writes no
-// chat.json, /save does.
-func TestSlashSavePersistsChatWithoutAutosave(t *testing.T) {
+// TestCommandSavePersistsChatWithoutAutosave proves the save command
+// carries the conversation to disk when autosave is off: the finished turn
+// writes no chat.json, save does.
+func TestCommandSavePersistsChatWithoutAutosave(t *testing.T) {
 	s := newTestSession(t, llm.NewScripted(scriptedText("A hush falls.")),
 		func(c *Config) { c.Autosave = false })
 
@@ -1008,13 +1169,13 @@ func TestSlashSavePersistsChatWithoutAutosave(t *testing.T) {
 		t.Fatalf("LoadChat without autosave = %v, want ErrNotFound (nothing written yet)", err)
 	}
 
-	if err := s.Send(t.Context(), tui.ChannelIC, "/save"); err != nil {
-		t.Fatalf("Send /save: %v", err)
+	if err := s.Command("save"); err != nil {
+		t.Fatalf("Command save: %v", err)
 	}
-	echo, saved := nextEvent(t, s), nextEvent(t, s)
-	if echo.Markdown != "/save" || saved.Kind != tui.EventSystem ||
+	saved := nextEvent(t, s)
+	if saved.Kind != tui.EventSystem ||
 		!strings.Contains(saved.Markdown, "session saved") {
-		t.Fatalf("events = %+v, want the /save echo then a saved system line", []tui.Event{echo, saved})
+		t.Fatalf("event = %+v, want a saved system line", saved)
 	}
 	data, err := s.store.LoadChat(s.ID())
 	if err != nil {

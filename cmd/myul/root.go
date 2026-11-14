@@ -483,6 +483,9 @@ model = "tev1:4b"
 # Session dice seed; 0 picks a fresh random seed per session.
 seed = 0
 autosave = true
+# Tool-call rounds one turn may spend before the loop stops with an error
+# (session-loop.md). 0 keeps the built-in default; otherwise 1..10000.
+max_tool_rounds = 200
 # House-rule toggles consulted by the engine, e.g.:
 # [game.house_rules]
 # extended_fumble = true

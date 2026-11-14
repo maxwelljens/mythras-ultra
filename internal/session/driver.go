@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,7 +18,7 @@ var ErrClosed = errors.New("session: closed")
 
 // ErrNoClient is reported by a turn when the session was built without a
 // model client (Config.Client nil — typically `myul new --no-tui` on a host
-// with no [llm] provider configured). The slash commands still work: they
+// with no [llm] provider configured). The local commands still work: they
 // never call the model.
 var ErrNoClient = errors.New("session: no language model configured (set [llm] provider and model)")
 
@@ -27,8 +28,9 @@ var _ tui.Driver = (*Session)(nil)
 // Send queues the player's text on ch and returns without waiting for the
 // model (tui.Driver). The runner echoes the text verbatim as an
 // EventNarrative on the same channel — the TUI matches echoes by exact
-// text, so it is never reformatted — and only then runs the turn or the
-// local slash command. The error is non-nil when the session is closed, the
+// text, so it is never reformatted — and only then runs the turn. The text
+// is never parsed for commands: prose that looks like "/save" reaches the
+// model as prose. The error is non-nil when the session is closed, the
 // text is empty, or ctx ends while the input queue is full.
 func (s *Session) Send(ctx context.Context, ch tui.Channel, text string) error {
 	if strings.TrimSpace(text) == "" {
@@ -42,6 +44,10 @@ func (s *Session) Send(ctx context.Context, ch tui.Channel, text string) error {
 		return ErrClosed
 	default:
 	}
+	// Both mode changes converge on SetChannel: the channel this message
+	// goes out on is the mode to remember for the next resume. It is a UI
+	// hint, so a failed meta.json write must never fail the send.
+	_ = s.SetChannel(ch)
 	select {
 	case s.inputs <- input{ch: ch, text: text}:
 		return nil
@@ -50,6 +56,58 @@ func (s *Session) Send(ctx context.Context, ch tui.Channel, text string) error {
 	case <-ctx.Done():
 		return fmt.Errorf("session: send: %w", ctx.Err())
 	}
+}
+
+// Command queues one named local command for the runner and returns without
+// waiting (tui.Driver). Commands carry no player text: they produce no echo,
+// they never reach the model, and they run on the same single-runner
+// goroutine as turns, so their events keep their place in the stream. The
+// command runs on the session's current channel (the last-used IC/OOC
+// mode). The error is non-nil when the session is closed or the name is
+// empty; an unknown name is reported back through Events as an error line
+// (session-loop.md "Commands").
+func (s *Session) Command(name string, args ...string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("session: refusing an unnamed command")
+	}
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	select {
+	case <-s.quit:
+		return ErrClosed
+	default:
+	}
+	select {
+	case s.inputs <- input{ch: s.LastChannel(), cmd: name, args: args}:
+		return nil
+	case <-s.quit:
+		return ErrClosed
+	}
+}
+
+// SetChannel remembers ch as the session's current IC/OOC mode and persists
+// it to meta.json immediately (tui.Driver), so a later [Resume] reopens on
+// the same channel — meta.json is tiny and written atomically, so writing
+// it beside the runner's own saves is safe. It is a UI hint, never game
+// state: after [Close] it is a no-op returning nil (the final saves have
+// run; nothing more is written). Safe to call from the TUI goroutine
+// concurrently with the runner.
+func (s *Session) SetChannel(ch tui.Channel) error {
+	if s.closed.Load() {
+		return nil
+	}
+	s.chanMu.Lock()
+	s.lastChannel = ch
+	s.chanMu.Unlock()
+	data, err := json.Marshal(sessionMeta{Channel: ch.String()})
+	if err != nil {
+		return fmt.Errorf("session: encode channel meta: %w", err)
+	}
+	if err := s.store.SaveMeta(s.state.ID, data); err != nil {
+		return fmt.Errorf("session: save channel meta: %w", err)
+	}
+	return nil
 }
 
 // Events returns the single event channel; every call returns the same one,

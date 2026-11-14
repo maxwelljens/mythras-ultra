@@ -57,8 +57,10 @@ func TestEchoAndReplayCarryAuthorship(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = second.Close() })
 
+	// The replayed play arrives on the event stream: the runner owns the
+	// internal queue (it clears it once delivered), so read it from there.
 	var sawPlayer, sawGM, extra bool
-	for _, ev := range second.replay {
+	for _, ev := range drainReplay(t, second) {
 		if ev.Kind != tui.EventNarrative {
 			continue
 		}

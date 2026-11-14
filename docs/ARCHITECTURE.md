@@ -147,8 +147,8 @@ test surface.
     (temp file + rename) after each accepted move; keeps last N snapshots.
   - `log.jsonl` — append-only audit log: every move, roll, tool call, message.
   - `chat.json` — the conversation snapshot (`[]llm.Message`, caller-marshalled
-    bytes), written atomically at turn end, `/save` and `Close`; seeds the
-    history on resume.
+    bytes), written atomically at turn end, on the `save` command
+    (`Driver.Command`) and on `Close`; seeds the history on resume.
   - `transcript.md` — rendered play log (regenerable from log.jsonl).
 - `Store` interface: `Save/Load/List/Delete`, `Record`/`ReadLog` for
   `log.jsonl`, `SaveChat/LoadChat` for `chat.json`; JSON impl now, bbolt
@@ -230,10 +230,10 @@ Bubbletea (see research notes for pinned major version), Lipgloss, Bubbles.
 - **Palette**: exactly 16 colours; built-in themes (`mythras`, `obsidian`,
   `parchment`) plus `terminal` theme honouring user's ANSI 16. Adaptive to
   colour profile (light/dark).
-- Keybindings: `ctrl+t` (IC/OOC), `ctrl+e` ($VISUAL editor), `ctrl+m`
+- Keybindings: `ctrl+p` (command palette — commands are picked there, not
+  typed), `ctrl+t` (IC/OOC), `ctrl+e` ($VISUAL editor), `ctrl+m`
   (metadata panel), `ctrl+l` (clear transcript), `enter`/`esc`/`q`,
-  `pgup`/`pgdn`; slash commands (`/roll`, `/save`, `/meta`, `/theme`,
-  `/editor`, `/recap`, `/help`, ...).
+  `pgup`/`pgdn` (the sheet overlay adds `esc` close while open).
 
 ## 8. CLI (`cmd/myul`, cobra)
 
@@ -248,9 +248,9 @@ Bubbletea (see research notes for pinned major version), Lipgloss, Bubbles.
 flag > env (`MYUL_*`) > config file > defaults.
 
 Key sections: `[llm]` (provider, model, api_key_env, base_url), `[decision]`
-(enabled, url, model), `[game]` (seed, autosave, house rules toggles),
-`[ui]` (theme, dice_animation, metadata_default, colour mode),
-`[prompts]` (paths overriding embedded prompts).
+(enabled, url, model), `[game]` (seed, autosave, max_tool_rounds, house
+rules toggles), `[ui]` (theme, dice_animation, metadata_default, colour
+mode), `[prompts]` (paths overriding embedded prompts).
 
 ## 10. Testing strategy
 

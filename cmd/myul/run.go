@@ -121,6 +121,7 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 		Overrides:     prompts.Overrides{SystemPromptPath: cfg.Prompts["system"]},
 		SessionsDir:   config.SessionsDir(),
 		Autosave:      cfg.Game.Autosave,
+		MaxToolRounds: cfg.Game.MaxToolRounds,
 		HistoryWindow: 0, // session default (32 messages)
 	}
 
@@ -193,6 +194,7 @@ func playTUI(cfg *config.Config, sess *session.Session, label string) error {
 		MetadataDefault: cfg.UI.MetadataDefault,
 		SessionName:     sess.Metadata().SessionName,
 		ModelName:       label,
+		InitialChannel:  sess.LastChannel(),
 	})
 	_, runErr := tea.NewProgram(app, progOpts...).Run()
 	closeErr := sess.Close()

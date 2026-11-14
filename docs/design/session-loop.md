@@ -11,7 +11,23 @@ session-orchestrator wave; keep in sync with `harness-surface.md`.
 the event stream to the UI. It implements the TUI's `tui.Driver` interface
 (consumer-side contract lives in `internal/tui/events.go`):
 
-- `Send(ctx, channel, text)` — player input (IC or OOC).
+- `Send(ctx, channel, text)` — player input (IC or OOC). Text is never
+  parsed for commands: prose that looks like `/save` reaches the model as
+  prose.
+- `Command(name, args...)` — one named local command (`roll`, `save`,
+  `recap`, `meta`), enqueued on the same single-runner goroutine as
+  messages. Commands carry no player text: they produce no echo, never
+  reach the model, and run on the session's current channel; an unknown
+  name comes back as an `EventError` listing the known commands. The TUI
+  drives it from the command palette (ctrl+p); view-only palette actions
+  (character sheet, clear, help, editor, quit, channel switch, themes)
+  stay inside the TUI and never cross this interface.
+- `SetChannel(channel)` — remembers the player's IC/OOC mode: it stores the
+  channel and writes it to `meta.json` immediately, so `Resume` reopens on
+  the last-used mode (`Options.InitialChannel` reads it via
+  `Session.LastChannel`). Called best-effort by the TUI on every switch
+  (ctrl+t, the palette's channel entry) and by `Send` itself; a UI hint, so
+  a failure is never surfaced, and a no-op after `Close()`.
 - `Events() <-chan Event` — one stable channel, closed by `Close()`.
 - `Metadata() tui.Metadata` — snapshot for the panel (from `resolve.State`).
 - `Close()` — final save, write `transcript.md`, close the channel.
@@ -21,11 +37,13 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
 1. Player `Send(text)` on IC:
    a. Echo the player's message back as `EventNarrative` (the TUI renders it
       as "You" via exact-text echo matching — echo the text VERBATIM).
-   b. Append to conversation as `RoleUser`. If a slash command (`/roll`,
-      `/save`, `/recap`, `/meta`, ...) it is handled locally instead: `/roll`
-      runs a `RollDice` move, `/save` saves, `/recap` returns the recap,
-      `/meta` prints the panel snapshot (the panel itself toggles with
-      `ctrl+m`).
+   b. Append to conversation as `RoleUser` and run the model turn. There is
+      no slash-command parsing anywhere: `/save`-looking prose goes to the
+      model as prose. Commands arrive separately through `Command(name,
+      args…)` (the palette, or the input line's `expr ▸` argument mode for
+      `roll`): `roll` runs a `RollDice`-tool dispatch, `save` saves,
+      `recap` returns the recaps, `meta` prints the panel snapshot (the
+      panel itself toggles with `ctrl+m`, the sheet opens in the TUI).
    c. Call `llm.Client.Chat` (or `Stream`) with: system prompt
       (prompts.Assemble: persona + recap + character/world summaries),
       conversation history, and the registry's `[]llm.ToolSpec`. Each call
@@ -38,9 +56,10 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
    b. Emit `EventToolAnnotation` (tool name + Result.Summary, OK flag) and,
       for each `Audit.Rolls`, an `EventDice` (Expr/Dice/Modifier/Total/
       Outcome) so the dice theatre plays.
-   c. Append `RoleTool` messages, re-call the LLM. Bound the loop (32
-      rounds, `maxToolRounds`) — on overflow, summarise and stop with an
-      `EventError`.
+   c. Append `RoleTool` messages, re-call the LLM. Bound the loop
+      (`Config.MaxToolRounds`, `config.game.max_tool_rounds`, default 200)
+      — on overflow, drop the unanswered calls and stop with an `EventError`
+      naming the configured cap.
 3. Assistant text: stream as `EventNarrative` deltas; a leading `[ic]` /
    `[ooc]` marker the model wrote inline is stripped before emission (the
    TUI derives the channel from `Event.Channel` — model output only, never
@@ -55,7 +74,7 @@ The conversation and the play text survive the process:
 
 - **History (`chat.json`)** — the session marshals `[]llm.Message` and
   writes it atomically (`Store.SaveChat`) at every autosaved turn end, on
-  `/save`, and on `Close`. `Resume` unmarshals it into the history before
+  the `save` command, and on `Close`. `Resume` unmarshals it into the history before
   the runner starts; missing or corrupt bytes continue with an empty
   history plus one system event (the prompt's recaps and summaries still
   carry the context).
@@ -73,6 +92,10 @@ The conversation and the play text survive the process:
   so it never re-records — only freshly produced events touch the log.
   `transcript.md` renders the same interleaving: `**You:** ` prefixed
   player lines, GM text verbatim, move annotations alongside.
+- **Preferences (`meta.json`)** — the IC/OOC mode last in use, written
+  atomically on every switch (`Store.SaveMeta`) and read at construction
+  (`Store.LoadMeta`); absent or corrupt bytes degrade to the in-character
+  channel rather than failing a resume.
 
 ## Determinism & audit
 

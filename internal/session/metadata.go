@@ -35,6 +35,7 @@ func buildMetadata(st *resolve.State) tui.Metadata {
 	if pc := playerCharacter(st); pc != nil {
 		m.Character = vitalsFor(pc, st)
 		m.Inventory = inventoryLines(pc)
+		m.Sheet = sheetFor(pc)
 	}
 	m.Scene = sceneLine(st.Scene)
 	m.Present = presentNames(st)
@@ -58,10 +59,7 @@ func playerCharacter(st *resolve.State) *char.Character {
 // hit location. Action Points appear only while an encounter is running —
 // outside combat there is no per-round pool to show.
 func vitalsFor(c *char.Character, st *resolve.State) tui.Vitals {
-	v := tui.Vitals{Name: c.Name, Culture: c.Culture, Career: c.Career}
-	if v.Name == "" {
-		v.Name = c.ID
-	}
+	v := tui.Vitals{Name: characterName(c), Culture: c.Culture, Career: c.Career}
 	var current int
 	for _, hp := range c.CurrentHP {
 		current += hp
@@ -83,14 +81,131 @@ func vitalsFor(c *char.Character, st *resolve.State) tui.Vitals {
 	v.PowerPoints = strconv.Itoa(c.Derived.PowerPoints)
 	v.Luck = strconv.Itoa(c.Derived.LuckPoints)
 	v.Locations = locationRows(c)
-	for _, cond := range c.Conditions {
-		label := cond.Name
-		if cond.Location != "" {
-			label += " (" + cond.Location + ")"
-		}
-		v.Conditions = append(v.Conditions, label)
-	}
+	v.Conditions = conditionLabels(c)
 	return v
+}
+
+// characterName renders the character's display name: its name, falling
+// back to the engine ID for a character created without one.
+func characterName(c *char.Character) string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.ID
+}
+
+// sheetFor renders the full character sheet block for the panel snapshot's
+// player character. It reads the same cached char.Derived snapshot the
+// vitals builder reads (the engine refreshes it; the TUI never derives
+// numbers), keeps the fixed characteristic order and sorts every mapped
+// list by value descending, then name — never map order.
+func sheetFor(c *char.Character) tui.Sheet {
+	s := tui.Sheet{
+		Name:       characterName(c),
+		Culture:    c.Culture,
+		Career:     c.Career,
+		Concept:    oneLine(c.Concept),
+		Skills:     ratedRows(skillMapRows(c)),
+		Styles:     ratedRows(styleRows(c)),
+		Passions:   ratedRows(passionRows(c)),
+		Inventory:  inventoryLines(c),
+		Locations:  locationRows(c),
+		Conditions: conditionLabels(c),
+	}
+	if c.Age > 0 {
+		s.Age = strconv.Itoa(c.Age)
+	}
+	ch := c.Chars
+	s.Characteristics = []tui.NameValue{
+		{Name: "STR", Value: strconv.Itoa(ch.STR)},
+		{Name: "CON", Value: strconv.Itoa(ch.CON)},
+		{Name: "SIZ", Value: strconv.Itoa(ch.SIZ)},
+		{Name: "DEX", Value: strconv.Itoa(ch.DEX)},
+		{Name: "INT", Value: strconv.Itoa(ch.INT)},
+		{Name: "POW", Value: strconv.Itoa(ch.POW)},
+		{Name: "CHA", Value: strconv.Itoa(ch.CHA)},
+	}
+	if max := c.Derived.HitPoints; max > 0 {
+		var current int
+		for _, hp := range c.CurrentHP {
+			current += hp
+		}
+		s.Derived = append(s.Derived, tui.NameValue{
+			Name: "HP", Value: strconv.Itoa(current) + "/" + strconv.Itoa(max),
+		})
+	}
+	s.Derived = append(s.Derived,
+		tui.NameValue{Name: "Damage Modifier", Value: c.Derived.DamageModifier},
+		tui.NameValue{Name: "Power Points", Value: strconv.Itoa(c.Derived.PowerPoints)},
+		tui.NameValue{Name: "Luck", Value: strconv.Itoa(c.Derived.LuckPoints)},
+		tui.NameValue{Name: "Experience Bonus", Value: strconv.Itoa(c.Derived.ExperienceModifier)},
+	)
+	return s
+}
+
+// rated is one mapped sheet row before its final ordering.
+type rated struct {
+	name  string
+	value int
+}
+
+// skillMapRows projects the skill map onto sortable rows (nil entries
+// skipped).
+func skillMapRows(c *char.Character) []rated {
+	rows := make([]rated, 0, len(c.Skills))
+	for name, sk := range c.Skills {
+		if sk == nil {
+			continue
+		}
+		rows = append(rows, rated{name: name, value: sk.Value})
+	}
+	return rows
+}
+
+// styleRows projects the combat styles onto sortable rows.
+func styleRows(c *char.Character) []rated {
+	rows := make([]rated, 0, len(c.CombatStyles))
+	for name, st := range c.CombatStyles {
+		if st == nil {
+			continue
+		}
+		rows = append(rows, rated{name: name, value: st.Value})
+	}
+	return rows
+}
+
+// passionRows projects the passions onto sortable rows.
+func passionRows(c *char.Character) []rated {
+	rows := make([]rated, 0, len(c.Passions))
+	for name, p := range c.Passions {
+		if p == nil {
+			continue
+		}
+		rows = append(rows, rated{name: name, value: p.Value})
+	}
+	return rows
+}
+
+// ratedSorted sorts sheet rows by value descending, then name — a stable
+// order regardless of map iteration.
+func ratedSorted(rows []rated) []rated {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].value != rows[j].value {
+			return rows[i].value > rows[j].value
+		}
+		return rows[i].name < rows[j].name
+	})
+	return rows
+}
+
+// ratedRows sorts sheet rows (ratedSorted) and renders each as "NN%".
+func ratedRows(rows []rated) []tui.NameValue {
+	rows = ratedSorted(rows)
+	out := make([]tui.NameValue, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, tui.NameValue{Name: r.name, Value: strconv.Itoa(r.value) + "%"})
+	}
+	return out
 }
 
 // locationRows renders one row per hit location in catalog order (stable —
@@ -307,38 +422,36 @@ func conditionNames(c *char.Character) []string {
 	return out
 }
 
+// conditionLabels renders active conditions the way the panel shows them:
+// the name, with the body location appended when the condition has one.
+func conditionLabels(c *char.Character) []string {
+	out := make([]string, 0, len(c.Conditions))
+	for _, cond := range c.Conditions {
+		label := cond.Name
+		if cond.Location != "" {
+			label += " (" + cond.Location + ")"
+		}
+		out = append(out, label)
+	}
+	return out
+}
+
 // keySkills renders the n highest-rated skills as "Name 45%", best first
 // with ties broken by name — a stable order regardless of map iteration.
 func keySkills(c *char.Character, n int) []string {
-	type rated struct {
-		name  string
-		value int
+	rows := ratedSorted(skillMapRows(c))
+	if len(rows) > n {
+		rows = rows[:n]
 	}
-	list := make([]rated, 0, len(c.Skills))
-	for name, sk := range c.Skills {
-		if sk == nil {
-			continue
-		}
-		list = append(list, rated{name: name, value: sk.Value})
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].value != list[j].value {
-			return list[i].value > list[j].value
-		}
-		return list[i].name < list[j].name
-	})
-	if len(list) > n {
-		list = list[:n]
-	}
-	out := make([]string, 0, len(list))
-	for _, r := range list {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
 		out = append(out, r.name+" "+strconv.Itoa(r.value)+"%")
 	}
 	return out
 }
 
-// metaDump renders the /meta system block: the panel snapshot plus the
-// harness's own labels (model, decision model), which have no panel slot.
+// metaDump renders the meta command's system block: the panel snapshot plus
+// the harness's own labels (model, decision model), which have no panel slot.
 func (s *Session) metaDump() string {
 	m := buildMetadata(s.state)
 	var b strings.Builder

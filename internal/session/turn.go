@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/mythras-ultra/myul/internal/engine/resolve"
 	"github.com/mythras-ultra/myul/internal/harness/llm"
@@ -17,11 +16,6 @@ import (
 )
 
 const (
-	// maxToolRounds bounds one turn's tool-call loop: after this many
-	// dispatch rounds the next model reply is reported as an EventError
-	// instead of being followed (session-loop.md: "Bound the loop ... stop
-	// with an EventError").
-	maxToolRounds = 32
 	// maxNarrativeBatch bounds how much streamed text accumulates before it
 	// is flushed as one EventNarrative when the model emits no newline.
 	maxNarrativeBatch = 4096
@@ -34,6 +28,11 @@ const (
 	// dispatches them normally: state never mutates outside the registry.
 	oocTag = "[ooc] "
 )
+
+// sessionCommands lists the commands [Session.Command] understands, in
+// help-output order; Command reports the same list on an unknown name
+// (the TUI's palette keeps its own catalogue — tui.PaletteCommands).
+var sessionCommands = []string{"roll", "save", "recap", "meta"}
 
 // channelTagRe matches a channel marker a model sometimes writes at the
 // very start of its reply ("[IC] The door…", "[ooc]: sure"). It is anchored
@@ -88,59 +87,57 @@ func (s *Session) run() {
 	}
 }
 
-// process echoes the player's text verbatim (recording it as a player chat
-// line), then routes it: slash commands run locally instead of through the
-// model, everything else is a model turn on the input's channel
-// (session-loop.md "Turn loop" step 1a–1b).
+// process routes one queued input: a local command runs immediately instead
+// of through the model, everything else is a player message — echoed
+// verbatim (recording it as a player chat line) and then run as a model
+// turn on the input's channel (session-loop.md "Turn loop" step 1a–1b).
+// Player text is never parsed for commands: prose that looks like "/save"
+// is prose, and reaches the model as typed.
 func (s *Session) process(in input) {
-	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text, Player: true}, true)
-
-	cmd, err := tui.ParseInput(in.text)
-	if err != nil {
-		// The TUI parses first and shows its own error; this path
-		// covers direct Driver users and unknown commands.
-		s.emitChat(tui.Event{Kind: tui.EventError, Channel: in.ch, Markdown: err.Error()}, false)
+	if in.cmd != "" {
+		s.runCommand(in.ch, in.cmd, in.args)
 		return
 	}
-	switch cmd.Kind {
-	case tui.CmdMessage:
-		s.runTurn(in.ch, in.text)
-	case tui.CmdHelp:
-		// /help is answered by the TUI overlay; when the driver is used
-		// outside the TUI it passes through to the model like chat.
-		s.runTurn(in.ch, in.text)
-	case tui.CmdRoll:
-		s.cmdRoll(in.ch, rollExpr(cmd.Text))
-	case tui.CmdSave:
-		s.cmdSave(in.ch)
-	case tui.CmdRecap:
-		s.cmdRecap(in.ch)
-	case tui.CmdMeta:
-		s.cmdMeta(in.ch)
-	default:
-		s.emitChat(tui.Event{Kind: tui.EventError, Channel: in.ch,
-			Markdown: "that command is handled by the TUI and never reaches the harness"}, false)
-	}
+	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text, Player: true}, true)
+	s.runTurn(in.ch, in.text)
 }
 
-// rollExpr returns a /roll line's argument exactly as typed — everything
-// after the command name — because dice expressions may contain spaces
-// that tui.ParseInput's argument splitting would break apart.
-func rollExpr(text string) string {
-	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "/"))
-	if i := strings.IndexFunc(rest, unicode.IsSpace); i >= 0 {
-		return strings.TrimSpace(rest[i:])
+// runCommand executes one command enqueued by [Session.Command] on the
+// runner goroutine (session-loop.md "Commands"): the same local effects
+// the old slash commands had — roll through the roll_dice tool, save the
+// session, replay the recaps, dump the panel snapshot — each reported with
+// its own system or error event. An unknown command is an error line
+// listing the known ones; no model call ever happens here.
+func (s *Session) runCommand(ch tui.Channel, name string, args []string) {
+	switch name {
+	case "roll":
+		expr := strings.TrimSpace(strings.Join(args, " "))
+		if expr == "" {
+			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: "roll needs an expression, e.g. roll 2d6+3 — commands: " +
+				strings.Join(sessionCommands, " ")}, false)
+			return
+		}
+		s.cmdRoll(ch, expr)
+	case "save":
+		s.cmdSave(ch)
+	case "recap":
+		s.cmdRecap(ch)
+	case "meta":
+		s.cmdMeta(ch)
+	default:
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
+			"unknown command %q — commands: %s", name,
+			strings.Join(sessionCommands, " "))}, false)
 	}
-	return ""
 }
 
 // cmdRoll runs the player's own roll through the roll_dice tool, so it
 // lands in the audit trail and the dice theatre exactly like a GM roll
-// (session-loop.md: slash commands are handled locally).
+// (session-loop.md: commands are handled locally).
 func (s *Session) cmdRoll(ch tui.Channel, expr string) {
-	args, err := json.Marshal(map[string]string{"expr": expr, "reason": "player /roll"})
+	args, err := json.Marshal(map[string]string{"expr": expr, "reason": "player roll"})
 	if err != nil {
-		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf("encode /roll: %v", err)}, false)
+		s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf("encode roll: %v", err)}, false)
 		return
 	}
 	// A bad expression comes back as a refused result, which the
@@ -189,12 +186,13 @@ type reply struct {
 // runTurn is one model turn (session-loop.md "Turn loop"): append the
 // player's text, assemble the system prompt, call the model, dispatch every
 // tool call it makes (annotation → dice → RoleTool results) and call again,
-// until it answers in prose — at most maxToolRounds dispatch rounds. A
-// model failure rolls the whole turn out of history so the player can
-// retry; a tool failure flows back as an IMPOSSIBLE result and never
-// aborts the turn. The turn is closed by endTurn, so exactly one
-// EventTurnEnd lands after the last event of the turn on every path —
-// success, tool-loop overflow or rollback.
+// until it answers in prose — at most s.maxRounds dispatch rounds
+// (Config.MaxToolRounds; defaultMaxToolRounds when unset). A model failure
+// rolls the whole turn out of history so the player can retry; a tool
+// failure flows back as an IMPOSSIBLE result and never aborts the turn.
+// The turn is closed by endTurn, so exactly one EventTurnEnd lands after
+// the last event of the turn on every path — success, tool-loop overflow
+// or rollback.
 func (s *Session) runTurn(ch tui.Channel, text string) {
 	defer s.endTurn(ch)
 	rollback := len(s.history)
@@ -227,14 +225,14 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 		if len(res.calls) == 0 {
 			break // prose answer: the turn is complete
 		}
-		if rounds >= maxToolRounds {
+		if rounds >= s.maxRounds {
 			// Providers reject a reply whose tool calls have no
 			// results, and this turn will not produce them: keep the
 			// narration, drop the unanswered calls, stop the loop.
 			s.dropDanglingCalls()
 			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
 				"the model kept calling tools for %d rounds in one turn — stopping here; nudge it to answer in prose",
-				maxToolRounds)}, false)
+				s.maxRounds)}, false)
 			break
 		}
 		rounds++
