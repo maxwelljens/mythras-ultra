@@ -866,3 +866,127 @@ func TestPlayerEchoRendersYou(t *testing.T) {
 		t.Errorf("exactly one You tag expected, got %d", n)
 	}
 }
+
+// TestTagVisibilityGroupsRuns pins the run-based annotation rule: a tag
+// shows only at the start of a run of entries from the same speaker on the
+// same channel — narrative/system/error entries count as chat, while tool
+// and dice strips are metadata inside the current run.
+func TestTagVisibilityGroupsRuns(t *testing.T) {
+	narr := func(ch Channel, player bool) entry {
+		return entry{ev: Event{Kind: EventNarrative, Channel: ch}, player: player}
+	}
+	sys := func(ch Channel, player bool) entry {
+		return entry{ev: Event{Kind: EventSystem, Channel: ch}, player: player}
+	}
+	ann := func(ch Channel) entry {
+		return entry{ev: Event{Kind: EventToolAnnotation, Channel: ch,
+			Annotation: &Annotation{ToolName: "t", Summary: "s", OK: true}}}
+	}
+	dice := func(ch Channel) entry {
+		return entry{ev: Event{Kind: EventDice, Channel: ch,
+			Dice: &DiceEvent{Expr: "1d6", Dice: []int{1}, Total: 1}}}
+	}
+	tests := []struct {
+		name    string
+		entries []entry
+		want    []bool
+	}{
+		{
+			"transcript start is always tagged",
+			[]entry{narr(ChannelIC, false)},
+			[]bool{true},
+		},
+		{
+			"a run tags only its first entry",
+			[]entry{narr(ChannelIC, false), narr(ChannelIC, false), narr(ChannelIC, false)},
+			[]bool{true, false, false},
+		},
+		{
+			"a channel switch re-tags",
+			[]entry{narr(ChannelIC, false), narr(ChannelOOC, false), narr(ChannelOOC, false)},
+			[]bool{true, true, false},
+		},
+		{
+			"a player to GM switch re-tags",
+			[]entry{narr(ChannelIC, true), narr(ChannelIC, false)},
+			[]bool{true, true},
+		},
+		{
+			"tool strips do not break the run",
+			[]entry{narr(ChannelIC, false), ann(ChannelIC), narr(ChannelIC, false)},
+			[]bool{true, false, false},
+		},
+		{
+			"dice strips do not break the run",
+			[]entry{narr(ChannelIC, false), dice(ChannelIC), narr(ChannelIC, false)},
+			[]bool{true, false, false},
+		},
+		{
+			"system lines count as chat",
+			[]entry{narr(ChannelIC, true), sys(ChannelIC, false), narr(ChannelIC, false)},
+			[]bool{true, true, false},
+		},
+		{
+			"a transcript opening on metadata still tags every speaker start",
+			[]entry{ann(ChannelIC), narr(ChannelIC, false)},
+			[]bool{true, true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tagVisibility(tt.entries)
+			if len(got) != len(tt.want) {
+				t.Fatalf("tagVisibility returned %d flags, want %d", len(got), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got[i] != want {
+					t.Errorf("entry %d tagged = %t, want %t (all: %v)", i, got[i], want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderEventTagSuppression checks the rendered side: a continuation
+// entry drops the tag, a run start keeps it, and an unlaid-out rendering
+// (w < 1) shows it rather than lose the sender.
+func TestRenderEventTagSuppression(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	ev := Event{Kind: EventNarrative, Channel: ChannelOOC, Markdown: "Sure."}
+
+	if got := plain(a.renderEvent(ev, 80, false, true)); !strings.Contains(got, "[ooc]") {
+		t.Errorf("a run-start entry should carry its tag: %q", got)
+	}
+	if got := plain(a.renderEvent(ev, 80, false, false)); strings.Contains(got, "[ooc]") {
+		t.Errorf("a continuation entry must not repeat the tag: %q", got)
+	}
+	if got := plain(a.renderEvent(ev, 0, false, false)); !strings.Contains(got, "[ooc]") {
+		t.Errorf("before layout the tag must show rather than be lost: %q", got)
+	}
+}
+
+// TestOOCRunTagsOnce drives a full OOC exchange through ingest: the player
+// echo, the GM's first paragraph and its continuation — tagged per speaker,
+// not per paragraph.
+func TestOOCRunTagsOnce(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	a.recordEcho("how far is the abbey?")
+	for _, md := range []string{
+		"how far is the abbey?",      // the harness echo of the player
+		"The abbey lies a day east.", // the GM starts a run
+		"Past the salt road.",        // continuation of the same run
+	} {
+		_, _ = a.Update(eventMsg{ev: Event{Kind: EventNarrative, Channel: ChannelOOC, Markdown: md}})
+	}
+	if len(a.entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(a.entries))
+	}
+	for i, want := range []bool{true, true, false} {
+		if a.entries[i].tagged != want {
+			t.Errorf("entry %d tagged = %t, want %t", i, a.entries[i].tagged, want)
+		}
+	}
+	if n := strings.Count(plain(view(a)), "[ooc]"); n != 2 {
+		t.Errorf("OOC run renders %d [ooc] tags, want 2 (once per speaker):\n%s", n, plain(view(a)))
+	}
+}

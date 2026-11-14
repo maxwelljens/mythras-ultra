@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -34,10 +35,13 @@ type Options struct {
 // entry is one transcript item together with its cached rendering. width is
 // the chat width the text was rendered for; a mismatch triggers a re-render.
 // player marks a harness echo of the player's own message, rendered with the
-// speaker tag instead of the GM's.
+// speaker tag instead of the GM's. tagged reports whether the cached text
+// carries the tag line: only the first entry of a run of messages from the
+// same speaker on the same channel shows its tags (see tagVisibility).
 type entry struct {
 	ev     Event
 	player bool
+	tagged bool
 	text   string
 	width  int
 }
@@ -67,6 +71,8 @@ type App struct {
 	dice    DiceTheatre // the roll currently on stage (idle when empty)
 	diceEv  Event       // the event the theatre is staging
 	diceIdx int         // transcript position the roll will be filed at
+
+	throb throbber // the header thinking/writing indicator (idle outside a turn)
 
 	panelOpen bool
 	helpOpen  bool
@@ -137,6 +143,7 @@ func New(d Driver, opts Options) *App {
 	}
 	a.theme = th
 	a.applyInputStyles()
+	a.throb = newThrobber(th)
 	a.dice = NewDiceTheatre(th, opts.DiceAnimation)
 	a.refreshMetadata()
 	return a
@@ -170,6 +177,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case driverClosedMsg:
 		a.systemLine("event stream closed — the harness is no longer sending updates")
+		a.throb.setState(throbIdle) // no EventTurnEnd will ever arrive
 		return a, nil
 
 	case sendResultMsg:
@@ -182,6 +190,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case metadataTickMsg:
 		a.refreshMetadata()
 		return a, a.metadataTick()
+
+	case spinner.TickMsg:
+		// The throbber re-arms itself only while a turn runs; a late tick
+		// after EventTurnEnd returns no command, so no timer survives.
+		return a, a.throb.update(msg)
 
 	case diceTickMsg, diceSettleMsg, diceFinishMsg:
 		cmd, done := a.dice.Update(msg)
@@ -512,10 +525,6 @@ func (a *App) appendEvent(ev Event, player bool) {
 // roll lands where it arrived even if other events came in during the
 // animation; an out-of-range idx is clamped into the transcript.
 func (a *App) insertEvent(idx int, ev Event, player bool) {
-	e := entry{ev: ev, player: player, width: a.chatW}
-	if a.chatW >= 1 {
-		e.text = a.renderEvent(ev, a.chatW, player)
-	}
 	if idx < 0 {
 		idx = 0
 	}
@@ -524,23 +533,66 @@ func (a *App) insertEvent(idx int, ev Event, player bool) {
 	}
 	a.entries = append(a.entries, entry{})
 	copy(a.entries[idx+1:], a.entries[idx:])
-	a.entries[idx] = e
+	a.entries[idx] = entry{ev: ev, player: player, width: a.chatW}
+	a.retag()
 	a.syncViewport()
 }
 
-// ingest files one harness event. Dice events go to the theatre instead of
-// the transcript: the roll animates in place while the transcript keeps
-// accepting events after it, and the banner is filed when the animation
-// finishes (at once when animation is off). Everything else — including the
-// harness's echo of the player's own message, recognised here — appends
-// immediately. It returns the command that drives the theatre, if any.
+// retag recomputes run visibility across the transcript after an insertion
+// (see tagVisibility) and re-renders only the entries whose rendering went
+// stale: the new one, or one whose tags changed because something was
+// spliced ahead of it. An append never changes anyone else's tags, so the
+// cost stays one render per event.
+func (a *App) retag() {
+	starts := tagVisibility(a.entries)
+	for i := range a.entries {
+		e := &a.entries[i]
+		if e.width == a.chatW && e.text != "" && e.tagged == starts[i] {
+			continue
+		}
+		e.tagged = starts[i]
+		if a.chatW >= 1 {
+			e.text = a.renderEvent(e.ev, a.chatW, e.player, e.tagged)
+		}
+		e.width = a.chatW
+	}
+}
+
+// ingest files one harness event. The two status kinds never reach the
+// transcript: EventThinking and EventTurnEnd drive the header throbber
+// only (EventError clears it as well as being filed). Dice events go to
+// the theatre instead of the transcript: the roll animates in place while
+// the transcript keeps accepting events after it, and the banner is filed
+// when the animation finishes (at once when animation is off). Everything
+// else — including the harness's echo of the player's own message,
+// recognised here — appends immediately. It returns the command that
+// drives the theatre or the throbber, if any.
 func (a *App) ingest(ev Event) tea.Cmd {
+	switch ev.Kind {
+	case EventThinking:
+		return a.throb.setState(throbThinking)
+	case EventTurnEnd:
+		return a.throb.setState(throbIdle)
+	}
+	var cmd tea.Cmd
+	if ev.Kind == EventError {
+		cmd = a.throb.setState(throbIdle) // a failed turn leaves no throbber behind
+	}
 	if ev.Kind == EventDice && ev.Dice != nil {
-		return a.startRoll(ev)
+		return tea.Batch(cmd, a.startRoll(ev))
 	}
 	player := ev.Kind == EventNarrative && a.consumeEcho(ev.Markdown)
 	a.appendEvent(ev, player)
-	return nil
+	switch {
+	case ev.Kind == EventNarrative && a.throb.state == throbThinking:
+		// The model's first words after EventThinking: it is writing now.
+		cmd = tea.Batch(cmd, a.throb.setState(throbWriting))
+	case ev.Kind == EventToolAnnotation && a.throb.state != throbIdle:
+		// The round is dispatched and the model re-invoked; a local slash
+		// command's annotation (no turn running) must not start one.
+		cmd = tea.Batch(cmd, a.throb.setState(throbThinking))
+	}
+	return cmd
 }
 
 // startRoll puts ev on stage. One roll animates at a time: a roll arriving
@@ -631,9 +683,12 @@ func (a *App) dropEcho(text string) {
 // rerender re-renders every entry at the current chat width — used when the
 // window size or the theme changes.
 func (a *App) rerender() {
+	starts := tagVisibility(a.entries)
 	for i := range a.entries {
-		a.entries[i].text = a.renderEvent(a.entries[i].ev, a.chatW, a.entries[i].player)
-		a.entries[i].width = a.chatW
+		e := &a.entries[i]
+		e.tagged = starts[i]
+		e.text = a.renderEvent(e.ev, a.chatW, e.player, e.tagged)
+		e.width = a.chatW
 	}
 	a.syncViewport()
 }
@@ -652,7 +707,14 @@ func (a *App) syncViewport() {
 			parts = append(parts, dice)
 			spliced = true
 		}
-		parts = append(parts, strings.TrimRight(e.text, "\n"))
+		// Glamour renders every block with a leading and trailing newline;
+		// the "\n\n" join supplies the separation, so trim BOTH edges of
+		// each part or every entry pair shows two blank lines (and a
+		// whitespace-only batch, e.g. a flushed paragraph break, adds a
+		// third). Skip parts that end up empty.
+		if t := strings.Trim(e.text, "\n"); strings.TrimSpace(t) != "" {
+			parts = append(parts, t)
+		}
 	}
 	if dice != "" && !spliced {
 		parts = append(parts, dice)
@@ -714,6 +776,7 @@ func (a *App) applyTheme() {
 	}
 	a.theme = th
 	a.applyInputStyles()
+	a.throb.setTheme(th)
 	a.dice.SetTheme(th)
 	a.rerender()
 }
@@ -729,16 +792,66 @@ func (a *App) applyInputStyles() {
 	a.input.SetStyles(st)
 }
 
+// runKey identifies who is speaking on the transcript: the channel and
+// whether the entry is the harness's echo of the player's own message.
+// Two entries share a key exactly while they belong to the same run.
+type runKey struct {
+	ch     Channel
+	player bool
+}
+
+// isSpeakerTurn reports whether an event kind speaks in its own voice:
+// narrative, system and error lines carry words from the player or the GM,
+// while tool-annotation and dice strips are metadata inside the current
+// speaker's turn — they neither show tags nor break a run.
+func isSpeakerTurn(k EventKind) bool {
+	switch k {
+	case EventToolAnnotation, EventDice:
+		return false
+	default:
+		return true
+	}
+}
+
+// tagVisibility reports, for every transcript entry, whether it must show
+// its speaker tags ("[ooc]", "You"). A tag appears only where a run
+// begins: the first entry, and any entry whose channel or speaker differs
+// from the last speaking entry before it. Callers render tags on whenever
+// the width is unknown (renderEvent forces them at w < 1), so no sender or
+// channel information can ever be lost.
+func tagVisibility(entries []entry) []bool {
+	starts := make([]bool, len(entries))
+	var prev runKey
+	speaking := false // a speaking entry has established the current run
+	for i, e := range entries {
+		if i == 0 {
+			starts[0] = true // the transcript's first entry always shows its tags
+		}
+		if !isSpeakerTurn(e.ev.Kind) {
+			continue // metadata: keeps the run around it intact
+		}
+		k := runKey{ch: e.ev.Channel, player: e.player}
+		if !speaking || k != prev {
+			starts[i] = true
+			prev, speaking = k, true
+		}
+	}
+	return starts
+}
+
 // renderEvent renders one transcript event for a chat width of w columns
-// (w < 1 means "not laid out yet": markdown falls back to a default wrap and
-// single-line renderings are not clipped). player marks the event as the
-// harness's echo of the player's own message, which is tagged "You" through
-// the speaker style; out-of-character lines keep their "[ooc]" tag either
-// way.
-func (a *App) renderEvent(ev Event, w int, player bool) string {
+// (w < 1 means "not laid out yet": markdown falls back to a default wrap,
+// single-line renderings are not clipped, and tags are always shown).
+// player marks the event as the harness's echo of the player's own message,
+// which is tagged "You" through the speaker style; out-of-character lines
+// keep their "[ooc]" tag either way. tagged reports whether this entry
+// starts a run (see tagVisibility): only that entry carries the tag line,
+// so a streamed run of paragraphs is annotated once, not per paragraph.
+func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 	wrap := w
 	if wrap < 1 {
 		wrap = 80
+		tagged = true // no layout yet: prefer showing the tag to losing it
 	}
 	var body string
 	switch ev.Kind {
@@ -761,7 +874,7 @@ func (a *App) renderEvent(ev Event, w int, player bool) string {
 	if player {
 		tags = append(tags, "You")
 	}
-	if len(tags) > 0 {
+	if tagged && len(tags) > 0 {
 		body = a.theme.Styles.Speaker.Render(strings.Join(tags, " ")) + "\n" + body
 	}
 	return body
@@ -877,6 +990,11 @@ func (a *App) renderHeader() string {
 		a.theme.Styles.Muted.Render("save –"),
 		a.theme.Styles.Muted.Render("decision –"),
 	)
+	// Trailing so earlier segments never shift; fit clips it first when the
+	// header runs short. Empty while idle, so no indicator outside a turn.
+	if throb := a.throb.view(); throb != "" {
+		parts = append(parts, throb)
+	}
 	sep := a.theme.Styles.Muted.Render("·")
 	return fit(a.theme.Styles.Header, strings.Join(parts, " "+sep+" "), a.width)
 }

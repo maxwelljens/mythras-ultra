@@ -27,8 +27,9 @@ func (c Channel) String() string {
 	}
 }
 
-// EventKind classifies what an event carries, which selects how the app
-// renders it.
+// EventKind classifies what an event carries: it selects how the app
+// renders a transcript entry, and the two status kinds (EventThinking,
+// EventTurnEnd) drive the header throbber instead of the transcript.
 type EventKind int
 
 const (
@@ -42,6 +43,14 @@ const (
 	EventSystem
 	// EventError is a failure surfaced to the player.
 	EventError
+	// EventThinking reports that a model call is in flight — the harness
+	// emits it before every llm.Chat/Stream, including re-invocations
+	// after tool rounds. It carries no transcript content: the header
+	// throbber shows the thinking state.
+	EventThinking
+	// EventTurnEnd reports that a turn finished, successfully or not. It
+	// carries no transcript content: the header throbber returns to idle.
+	EventTurnEnd
 )
 
 // Annotation describes one engine tool call for the annotation strip.
@@ -145,6 +154,11 @@ type Event struct {
 //     an error line. On success the harness emits the player's message back
 //     through Events (an EventNarrative on the same channel) — the TUI does
 //     not echo input itself, the harness owns the transcript.
+//   - A model turn is bracketed for the header throbber: the harness emits
+//     EventThinking before each model call and exactly one EventTurnEnd
+//     when the turn completes or aborts (error path included). Neither
+//     carries transcript content, and both arrive in order with every
+//     other event of that turn.
 //   - Events returns the event stream; every call must return the same
 //     channel, which the app reads once at construction. The app re-arms a
 //     read after each event, so events must be delivered one at a time.
