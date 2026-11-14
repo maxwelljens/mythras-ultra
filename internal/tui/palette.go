@@ -60,6 +60,11 @@ type PaletteCommand struct {
 	// Description is the row's hint, matched only after the name fails
 	// (substring, case-insensitive).
 	Description string
+	// Keybind is the shortcut that runs the same command directly
+	// (shown right-aligned in the row; empty when there is none). It
+	// must mirror the app's real bindings — TestPaletteKeybinds pins the
+	// catalogue against them.
+	Keybind string
 	// Session names the command forwarded over Driver.Command when the
 	// entry runs ("save", "recap", "roll" — the last one after its
 	// argument is typed). Empty means the entry never reaches the session.
@@ -85,17 +90,17 @@ func PaletteCommands(ch Channel) []PaletteCommand {
 	}
 	if ch == ChannelIC {
 		cmds = append(cmds, PaletteCommand{
-			Name: "Switch to OOC", Description: "in-character / out-of-character chat", local: actChannelOOC,
+			Name: "Switch to OOC", Description: "in-character / out-of-character chat", Keybind: "ctrl+t", local: actChannelOOC,
 		})
 	} else {
 		cmds = append(cmds, PaletteCommand{
-			Name: "Switch to IC", Description: "in-character / out-of-character chat", local: actChannelIC,
+			Name: "Switch to IC", Description: "in-character / out-of-character chat", Keybind: "ctrl+t", local: actChannelIC,
 		})
 	}
 	cmds = append(cmds,
-		PaletteCommand{Name: "Clear screen", Description: "reset the transcript view", local: actClear},
+		PaletteCommand{Name: "Clear screen", Description: "reset the transcript view", Keybind: "ctrl+l", local: actClear},
 		PaletteCommand{Name: "Help", Description: "keybindings and commands", local: actHelp},
-		PaletteCommand{Name: "Open editor", Description: "$VISUAL for a long message", local: actEditor},
+		PaletteCommand{Name: "Open editor", Description: "$VISUAL for a long message", Keybind: "ctrl+e", local: actEditor},
 	)
 	// Themes carry their argument in the entry itself: no argument mode.
 	for _, name := range Names() {
@@ -104,7 +109,7 @@ func PaletteCommands(ch Channel) []PaletteCommand {
 		})
 	}
 	return append(cmds, PaletteCommand{
-		Name: "Quit", Description: "exit myul (state is saved)", local: actQuit,
+		Name: "Quit", Description: "exit myul (state is saved)", Keybind: "ctrl+c", local: actQuit,
 	})
 }
 
@@ -350,18 +355,30 @@ func (p *palette) view(th Theme, width, height int) string {
 		if end > len(p.matches) {
 			end = len(p.matches)
 		}
+		// Keybind column: right-aligned and sized to the visible rows, so
+		// entries with a binding line up and rows without one keep the
+		// column blank.
+		kbCol := 0
+		for _, idx := range p.matches[p.top:end] {
+			if w := lipgloss.Width(keybindCell(th, p.entries[idx])); w > kbCol {
+				kbCol = w
+			}
+		}
 		for _, idx := range p.matches[p.top:end] {
 			c := p.entries[idx]
 			row := padRight(c.Name, 20)
+			kb := keybindCell(th, c)
+			budget := innerW - lipgloss.Width(row) - kbCol - 2
+			desc := fitDesc(th, c.Description, budget)
+			if gap := budget - lipgloss.Width(desc); gap > 0 {
+				desc += strings.Repeat(" ", gap)
+			}
+			desc += strings.Repeat(" ", kbCol-lipgloss.Width(kb))
 			if idx == p.matches[p.sel] {
-				lines = append(lines,
-					th.Styles.Highlight.Render("> "+row)+
-						fitDesc(th, c.Description, innerW-lipgloss.Width(row)-2))
+				lines = append(lines, th.Styles.Highlight.Render("> "+row)+desc+kb)
 				continue
 			}
-			lines = append(lines,
-				th.Styles.Panel.Render("  "+row)+
-					fitDesc(th, c.Description, innerW-lipgloss.Width(row)-2))
+			lines = append(lines, th.Styles.Panel.Render("  "+row)+desc+kb)
 		}
 	}
 	lines = append(lines, th.Styles.Muted.Render("↑/↓ move · enter run · esc close"))
@@ -390,4 +407,14 @@ func fitDesc(th Theme, desc string, w int) string {
 		return ""
 	}
 	return th.Styles.Muted.MaxWidth(w).Render(desc)
+}
+
+// keybindCell renders one row's keybind cell in the speaker style (the
+// UI-label style, distinct from the muted description); empty when the
+// command has no binding.
+func keybindCell(th Theme, c PaletteCommand) string {
+	if c.Keybind == "" {
+		return ""
+	}
+	return th.Styles.Speaker.Render(c.Keybind)
 }
