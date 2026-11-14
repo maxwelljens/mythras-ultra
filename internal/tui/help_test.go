@@ -23,10 +23,14 @@ func TestRenderHelpListsKeysAndCommands(t *testing.T) {
 			t.Errorf("help should list key %q, help:\n%s", k[0], got)
 		}
 	}
+	// The command list wraps across lines (and the box borders sit in the
+	// way); compare on border-stripped, collapsed whitespace.
+	strip := strings.NewReplacer("│", "", "─", "", "┌", "", "┐", "", "└", "", "┘", "")
+	flat := strings.Join(strings.Fields(strip.Replace(got)), " ")
 	for _, want := range []string{"ctrl+t", "ctrl+e", "ctrl+m", "ctrl+l",
-		"/ic", "/ooc", "/theme", "/editor", "/clear", "/help", "/quit",
-		"/roll", "/save", "/recap", "/meta", "enter or esc closes"} {
-		if !strings.Contains(got, want) {
+		"ctrl+p", "Character sheet", "Roll dice", "Save session", "Session recap",
+		"Switch to OOC", "Theme: mythras", "Quit", "enter or esc closes"} {
+		if !strings.Contains(flat, want) {
 			t.Errorf("help should mention %q, help:\n%s", want, got)
 		}
 	}
@@ -52,8 +56,7 @@ func TestHelpOverlayOpenCloseCycles(t *testing.T) {
 	a, _ := newTestApp(t, Options{}, 80, 20)
 	open := func(t *testing.T, step string) {
 		t.Helper()
-		a.input.SetValue("/help")
-		press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		paletteChoose(t, a, "help")
 		if !a.helpOpen {
 			t.Fatalf("%s: help should be open", step)
 		}
@@ -69,10 +72,10 @@ func TestHelpOverlayOpenCloseCycles(t *testing.T) {
 		}
 	}
 
-	// /help opens the overlay instead of a transcript line.
+	// The palette's Help entry opens the overlay instead of a transcript line.
 	open(t, "first open")
 	got := plain(view(a))
-	for _, want := range []string{"/roll", "/theme", "ctrl+t"} {
+	for _, want := range []string{"Roll dice", "Theme: mythras", "ctrl+t"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("open help should mention %q, view:\n%s", want, got)
 		}
@@ -96,16 +99,28 @@ func TestHelpOverlayOpenCloseCycles(t *testing.T) {
 
 	closeVia(t, tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
 
-	// enter dismisses it too, and clears an "/help" typed on the way.
+	// enter dismisses it too; a message typed while reading survives it.
 	open(t, "second open")
-	a.input.SetValue("/help")
-	closeVia(t, tea.KeyPressMsg{Code: tea.KeyEnter}, "enter on /help")
-	if a.input.Value() != "" {
-		t.Errorf("dismissing with a typed /help should clear the line, got %q", a.input.Value())
+	a.input.SetValue("I wait and listen.")
+	closeVia(t, tea.KeyPressMsg{Code: tea.KeyEnter}, "enter")
+	if a.input.Value() != "I wait and listen." {
+		t.Errorf("dismissing with a typed message should keep the line, got %q", a.input.Value())
 	}
+	a.input.Reset()
+
+	// ctrl+p swaps the palette in for help.
+	open(t, "third open")
+	press(t, a, ctrl('p'))
+	if a.helpOpen {
+		t.Error("ctrl+p should close help")
+	}
+	if !a.pal.open {
+		t.Error("ctrl+p should open the palette")
+	}
+	press(t, a, tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	// ctrl+c still quits while the overlay is up.
-	open(t, "third open")
+	open(t, "fourth open")
 	if cmd = press(t, a, ctrl('c')); cmd == nil {
 		t.Fatal("ctrl+c should still quit from the overlay")
 	} else if _, ok := cmd().(tea.QuitMsg); !ok {
@@ -114,7 +129,7 @@ func TestHelpOverlayOpenCloseCycles(t *testing.T) {
 	closeVia(t, tea.KeyPressMsg{Code: tea.KeyEsc}, "esc after quit check")
 
 	// A message typed while open survives the dismissal for review.
-	open(t, "fourth open")
+	open(t, "fifth open")
 	a.input.SetValue("I wait and listen.")
 	closeVia(t, tea.KeyPressMsg{Code: tea.KeyEsc}, "esc keeps input")
 	if a.input.Value() != "I wait and listen." {

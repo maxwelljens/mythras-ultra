@@ -89,7 +89,16 @@ func TestPlayerDimKeepsSpacing(t *testing.T) {
 	if knock < 0 || door < 0 {
 		t.Fatalf("both lines should render (knock=%d door=%d):\n%s", knock, door, plain(view(a)))
 	}
-	if door-knock != 2 {
-		t.Errorf("exactly one blank line between player and GM entry, got %d", door-knock-1)
+	// The player entry wears the "You" tag and the GM entry the "GM" tag
+	// (each is a run start), so count the blank separator lines between
+	// them rather than the raw line distance.
+	blank := 0
+	for _, l := range lines[knock+1 : door] {
+		if strings.TrimSpace(l) == "" {
+			blank++
+		}
+	}
+	if blank != 1 {
+		t.Errorf("exactly one blank line between player and GM entry, got %d", blank)
 	}
 }

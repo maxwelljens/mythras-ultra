@@ -23,18 +23,26 @@ func plain(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
 }
 
-// fakeDriver records Sends and hands out events; it stands in for the
-// harness so no real terminal, network or LLM is involved.
+// fakeDriver records Sends, Commands and channel switches; it stands in
+// for the harness so no real terminal, network or LLM is involved.
 type fakeDriver struct {
-	events  chan Event
-	sendErr error
-	sends   []sentRecord
-	md      Metadata // handed out by Metadata()
+	events     chan Event
+	sendErr    error
+	sends      []sentRecord
+	commands   []commandRecord // Driver.Command calls, in order
+	commandErr error           // returned by Command
+	channels   []Channel       // SetChannel calls, in order
+	md         Metadata        // handed out by Metadata()
 }
 
 type sentRecord struct {
 	ch   Channel
 	text string
+}
+
+type commandRecord struct {
+	name string
+	args []string
 }
 
 var _ Driver = (*fakeDriver)(nil)
@@ -49,6 +57,16 @@ func (d *fakeDriver) Send(ctx context.Context, ch Channel, text string) error {
 	}
 	d.sends = append(d.sends, sentRecord{ch: ch, text: text})
 	return d.sendErr
+}
+
+func (d *fakeDriver) Command(name string, args ...string) error {
+	d.commands = append(d.commands, commandRecord{name: name, args: args})
+	return d.commandErr
+}
+
+func (d *fakeDriver) SetChannel(ch Channel) error {
+	d.channels = append(d.channels, ch)
+	return nil
 }
 
 func (d *fakeDriver) Events() <-chan Event { return d.events }
@@ -442,11 +460,13 @@ func TestDriverEventStream(t *testing.T) {
 	}
 }
 
-func TestLocalCommands(t *testing.T) {
+// TestPaletteLocalActions drives the palette's view actions end to end:
+// every entry is picked by injecting key presses (open → type to filter →
+// enter), and the local effects land without the driver seeing a thing.
+func TestPaletteLocalActions(t *testing.T) {
 	t.Run("theme", func(t *testing.T) {
 		a, _ := newTestApp(t, Options{}, 60, 20)
-		a.input.SetValue("/theme obsidian")
-		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		paletteChoose(t, a, "obsidian")
 		if a.theme.Name != "obsidian" {
 			t.Errorf("theme = %q, want obsidian", a.theme.Name)
 		}
@@ -454,8 +474,9 @@ func TestLocalCommands(t *testing.T) {
 			t.Errorf("theme change should be reported, view:\n%s", view(a))
 		}
 
-		a.input.SetValue("/theme nope")
-		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		// Defensive: the palette only offers built-ins, but an unknown
+		// name must still surface instead of silently keeping the theme.
+		a.applyThemeName("nope")
 		if !strings.Contains(view(a), "valid themes") {
 			t.Errorf("bad theme should list the valid ones, view:\n%s", view(a))
 		}
@@ -467,65 +488,143 @@ func TestLocalCommands(t *testing.T) {
 		if len(a.entries) == 0 {
 			t.Fatal("expected an entry before clearing")
 		}
-		a.input.SetValue("/clear")
-		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		paletteChoose(t, a, "clear screen")
 		if len(a.entries) != 0 {
-			t.Errorf("/clear should empty the transcript, got %d entries", len(a.entries))
+			t.Errorf("Clear screen should empty the transcript, got %d entries", len(a.entries))
 		}
 		if !a.follow {
-			t.Error("/clear should re-arm follow mode")
+			t.Error("Clear screen should re-arm follow mode")
 		}
 	})
 
 	t.Run("help", func(t *testing.T) {
 		a, _ := newTestApp(t, Options{}, 80, 20)
-		a.input.SetValue("/help")
-		_ = press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		paletteChoose(t, a, "help")
+		if !a.helpOpen {
+			t.Fatal("Help should open the overlay")
+		}
 		got := view(a)
-		for _, want := range []string{"/roll", "/theme", "ctrl+t"} {
+		for _, want := range []string{"Roll dice", "Theme: mythras", "ctrl+t", "ctrl+p"} {
 			if !strings.Contains(got, want) {
-				t.Errorf("/help should mention %q, view:\n%s", want, got)
+				t.Errorf("help should mention %q, view:\n%s", want, got)
 			}
 		}
 	})
 
 	t.Run("quit", func(t *testing.T) {
 		a, _ := newTestApp(t, Options{}, 60, 20)
-		a.input.SetValue("/quit")
-		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		cmd := paletteChoose(t, a, "quit")
 		if cmd == nil {
-			t.Fatal("/quit should return a command")
+			t.Fatal("Quit should return a command")
 		}
 		if _, ok := cmd().(tea.QuitMsg); !ok {
-			t.Error("/quit should quit")
+			t.Error("Quit should quit")
 		}
 	})
 
-	t.Run("harness commands route verbatim", func(t *testing.T) {
+	t.Run("session commands go over Driver.Command", func(t *testing.T) {
 		a, d := newTestApp(t, Options{}, 60, 20)
-		a.input.SetValue("/roll 3d6+2")
-		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
-		if cmd == nil {
-			t.Fatal("/roll should be forwarded to the driver")
+		if cmd := paletteChoose(t, a, "save session"); cmd != nil {
+			_ = cmd() // the command runs off the update loop, like a send
 		}
-		_ = cmd()
-		if len(d.sends) != 1 || d.sends[0].text != "/roll 3d6+2" {
-			t.Errorf("sends = %+v, want verbatim /roll 3d6+2", d.sends)
+		if len(d.commands) != 1 || d.commands[0].name != "save" {
+			t.Fatalf("commands = %+v, want one Driver.Command(\"save\")", d.commands)
+		}
+		if len(d.sends) != 0 {
+			t.Errorf("sends = %+v, want none — commands are not chat", d.sends)
 		}
 	})
 
-	t.Run("parse errors surface", func(t *testing.T) {
+	t.Run("typed slash text is plain chat", func(t *testing.T) {
 		a, d := newTestApp(t, Options{}, 60, 20)
 		a.input.SetValue("/frobnicate")
 		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("typed text should be sent")
+		}
+		_ = cmd()
+		if len(d.sends) != 1 || d.sends[0].text != "/frobnicate" {
+			t.Errorf("sends = %+v, want the typed text verbatim", d.sends)
+		}
+		if len(d.commands) != 0 {
+			t.Errorf("commands = %+v, want none — typed text never parses", d.commands)
+		}
+		if strings.Contains(view(a), "unknown command") {
+			t.Errorf("no parse error may appear, view:\n%s", view(a))
+		}
+	})
+}
+
+// TestRollArgMode pins the palette's only argument command: choosing Roll
+// dice closes the palette and puts the input line into expr mode, Enter
+// runs Driver.Command("roll", expr), and esc cancels back to normal.
+func TestRollArgMode(t *testing.T) {
+	t.Run("enter runs the roll command", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 60, 20)
+		paletteChoose(t, a, "roll dice")
+		if a.argMode != "roll" {
+			t.Fatalf("argMode = %q, want roll", a.argMode)
+		}
+		if a.pal.open {
+			t.Fatal("choosing an entry must close the palette")
+		}
+		if a.input.Prompt != "expr ▸ " {
+			t.Errorf("prompt = %q, want %q", a.input.Prompt, "expr ▸ ")
+		}
+		if len(d.commands) != 0 {
+			t.Fatalf("commands = %+v, want none until enter", d.commands)
+		}
+
+		typeKeys(a, "2d6+3")
+		cmd := press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("enter in arg mode should produce a command")
+		}
+		_ = cmd()
+		if len(d.commands) != 1 || d.commands[0].name != "roll" ||
+			len(d.commands[0].args) != 1 || d.commands[0].args[0] != "2d6+3" {
+			t.Fatalf("commands = %+v, want roll 2d6+3", d.commands)
+		}
+		if a.argMode != "" || a.input.Prompt != "> " {
+			t.Errorf("after enter: argMode=%q prompt=%q, want back to normal", a.argMode, a.input.Prompt)
+		}
+		if a.input.Value() != "" {
+			t.Errorf("input = %q, want it cleared", a.input.Value())
+		}
+	})
+
+	t.Run("esc cancels to the normal prompt", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 60, 20)
+		paletteChoose(t, a, "roll dice")
+		typeKeys(a, "3d6")
+		press(t, a, tea.KeyPressMsg{Code: tea.KeyEsc})
+		if a.argMode != "" || a.input.Prompt != "> " {
+			t.Fatalf("after esc: argMode=%q prompt=%q, want normal line", a.argMode, a.input.Prompt)
+		}
+		if len(d.commands) != 0 {
+			t.Errorf("commands = %+v, want none after cancel", d.commands)
+		}
+		// An empty enter also leaves arg mode without running anything.
+		paletteChoose(t, a, "roll dice")
+		press(t, a, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if a.argMode != "" {
+			t.Errorf("empty enter should cancel arg mode, got %q", a.argMode)
+		}
+		if len(d.commands) != 0 {
+			t.Errorf("commands = %+v, want none for an empty expression", d.commands)
+		}
+	})
+
+	t.Run("command failure surfaces as an error line", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 60, 20)
+		d.commandErr = errors.New("session closed")
+		cmd := paletteChoose(t, a, "save session")
 		if cmd != nil {
-			t.Error("unknown commands must not be sent")
+			_, _ = a.Update(cmd())
 		}
-		if len(d.sends) != 0 {
-			t.Errorf("sends = %+v, want none", d.sends)
-		}
-		if !strings.Contains(view(a), "unknown command") {
-			t.Errorf("parse errors should be shown, view:\n%s", view(a))
+		if !strings.Contains(view(a), "command save failed") ||
+			!strings.Contains(view(a), "session closed") {
+			t.Errorf("command errors should surface, view:\n%s", view(a))
 		}
 	})
 }
@@ -988,5 +1087,107 @@ func TestOOCRunTagsOnce(t *testing.T) {
 	}
 	if n := strings.Count(plain(view(a)), "[ooc]"); n != 2 {
 		t.Errorf("OOC run renders %d [ooc] tags, want 2 (once per speaker):\n%s", n, plain(view(a)))
+	}
+}
+
+// TestGMSpeakerTag pins the rendered side of the GM annotation: a run-start
+// GM line carries the speaker tag exactly like a player's "You", a
+// continuation drops it, an un-laid-out rendering (w < 1) forces it rather
+// than lose the speaker, an OOC GM run joins the channel tag as
+// "[ooc] GM", and system/error lines never carry a speaker tag.
+func TestGMSpeakerTag(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	narr := Event{Kind: EventNarrative, Channel: ChannelIC, Markdown: "The lamp gutters."}
+
+	if got := plain(a.renderEvent(narr, 80, false, true)); !strings.Contains(got, "GM") {
+		t.Errorf("a GM run start should carry the GM tag: %q", got)
+	}
+	if got := plain(a.renderEvent(narr, 80, false, false)); strings.Contains(got, "GM") {
+		t.Errorf("a second GM line in the run must not repeat the tag: %q", got)
+	}
+	if got := plain(a.renderEvent(narr, 0, false, false)); !strings.Contains(got, "GM") {
+		t.Errorf("before layout the GM tag must show rather than be lost: %q", got)
+	}
+	if got := plain(a.renderEvent(narr, 80, true, true)); !strings.Contains(got, "You") || strings.Contains(got, "GM") {
+		t.Errorf("a player run keeps the You tag and no GM tag: %q", got)
+	}
+	ooc := Event{Kind: EventNarrative, Channel: ChannelOOC, Markdown: "The inn closes at dusk."}
+	if got := plain(a.renderEvent(ooc, 80, false, true)); !strings.Contains(got, "[ooc] GM") {
+		t.Errorf("an OOC GM run should read %q: %q", "[ooc] GM", got)
+	}
+	for _, kind := range []EventKind{EventSystem, EventError} {
+		line := Event{Kind: kind, Channel: ChannelIC, Markdown: "the clock advances"}
+		if got := plain(a.renderEvent(line, 80, false, true)); strings.Contains(got, "GM") {
+			t.Errorf("kind %v lines carry no speaker tag: %q", kind, got)
+		}
+	}
+}
+
+// TestGMRunTagsOnce drives a full exchange through ingest — two GM lines, a
+// player line, another GM line — and pins the run rule on the rendered
+// transcript: GM appears once per GM run, You once for the player run, and
+// each speaker switch re-tags.
+func TestGMRunTagsOnce(t *testing.T) {
+	a, _ := newTestApp(t, Options{}, 80, 20)
+	for _, ev := range []Event{
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "The bell tolls twice."},
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "It tolls for the dead."},
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "I count the peals.", Player: true},
+		{Kind: EventNarrative, Channel: ChannelIC, Markdown: "Night falls over the moor."},
+	} {
+		_, _ = a.Update(eventMsg{ev: ev})
+	}
+	if len(a.entries) != 4 {
+		t.Fatalf("entries = %d, want 4", len(a.entries))
+	}
+	for i, want := range []bool{true, false, true, true} {
+		if a.entries[i].tagged != want {
+			t.Errorf("entry %d tagged = %t, want %t", i, a.entries[i].tagged, want)
+		}
+	}
+	got := plain(view(a))
+	if n := strings.Count(got, "GM"); n != 2 {
+		t.Errorf("GM lines render %d GM tags, want 2 (once per run):\n%s", n, got)
+	}
+	if n := strings.Count(got, "You"); n != 1 {
+		t.Errorf("player run renders %d You tags, want 1:\n%s", n, got)
+	}
+}
+
+// TestOptionsInitialChannelStartsOnOOC pins the persisted-mode handoff: the
+// app opens on the channel Options names — the session's last-used mode —
+// in both the input prompt and the header switch.
+func TestOptionsInitialChannelStartsOnOOC(t *testing.T) {
+	a, _ := newTestApp(t, Options{InitialChannel: ChannelOOC}, 60, 20)
+	if a.channel != ChannelOOC || a.input.Prompt != "ooc> " {
+		t.Fatalf("start: channel=%v prompt=%q", a.channel, a.input.Prompt)
+	}
+	got := view(a)
+	for _, want := range []string{"[OOC]", "ooc> "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("OOC start should show %q, view:\n%s", want, got)
+		}
+	}
+}
+
+// TestChannelSwitchNotifiesDriver pins the mode-persistence hook: every
+// local switch path — ctrl+t and the palette's channel entry — reports the
+// new channel to the driver, which persists it for the next resume.
+func TestChannelSwitchNotifiesDriver(t *testing.T) {
+	a, d := newTestApp(t, Options{}, 60, 20)
+	if len(d.channels) != 0 {
+		t.Fatalf("construction must not report a channel, got %v", d.channels)
+	}
+	press(t, a, ctrl('t'))
+	if len(d.channels) != 1 || d.channels[0] != ChannelOOC {
+		t.Fatalf("after ctrl+t channels = %v, want [OOC]", d.channels)
+	}
+	paletteChoose(t, a, "switch to ic")
+	if len(d.channels) != 2 || d.channels[1] != ChannelIC {
+		t.Fatalf("after the palette switch channels = %v, want [OOC IC]", d.channels)
+	}
+	paletteChoose(t, a, "switch to ooc")
+	if len(d.channels) != 3 || d.channels[2] != ChannelOOC {
+		t.Errorf("after the second palette switch channels = %v, want [OOC IC OOC]", d.channels)
 	}
 }

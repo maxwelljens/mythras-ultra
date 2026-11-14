@@ -1,7 +1,7 @@
 // Package tui is the terminal front end for Mythras Ultra: an app shell with
-// a chat transcript, an input line, themes, slash commands and an external
-// editor. It renders facts it is given (events from the harness) and never
-// computes game outcomes itself.
+// a chat transcript, an input line, themes, a command palette (ctrl+p) and
+// an external editor. It renders facts it is given (events from the
+// harness) and never computes game outcomes itself.
 package tui
 
 import (

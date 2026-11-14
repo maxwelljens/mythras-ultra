@@ -11,6 +11,7 @@ import (
 // whole overlay fits an 80×20 window; the last row folds scrolling and
 // history together.
 var helpKeys = [][2]string{
+	{"ctrl+p", "command palette"},
 	{"ctrl+t", "in/out of character"},
 	{"ctrl+e", "edit input in $VISUAL"},
 	{"ctrl+m", "metadata panel"},
@@ -21,30 +22,9 @@ var helpKeys = [][2]string{
 	{"pgup/pgdn", "scroll · up/down history"},
 }
 
-// helpCommands splits input.go's commandNames by where submit dispatches
-// them: local commands act inside the TUI, harness commands go to the driver
-// verbatim. Classifying by kind keeps this list from drifting from the
-// parser.
-func helpCommands(harness bool) []string {
-	out := make([]string, 0, len(commandNames))
-	for _, name := range commandNames {
-		switch commandKinds[name] {
-		case CmdRoll, CmdSave, CmdRecap, CmdMeta:
-			if harness {
-				out = append(out, "/"+name)
-			}
-		default:
-			if !harness {
-				out = append(out, "/"+name)
-			}
-		}
-	}
-	return out
-}
-
 // renderHelp builds the help overlay for a width×height area: a bordered,
-// centred box listing every keybinding and slash command with a dim
-// dismissal hint. It is a pure function of theme and size so tests can
+// centred box listing every keybinding and the palette's commands with a
+// dim dismissal hint. It is a pure function of theme and size so tests can
 // render it without an App. Rows assume a reasonably wide terminal; on
 // narrower ones an over-long row spills and the terminal wraps it.
 func renderHelp(th Theme, width, height int) string {
@@ -69,12 +49,12 @@ func renderHelp(th Theme, width, height int) string {
 			th.Styles.Highlight.Render("  "+padRight(k[0], 10))+
 				th.Styles.Panel.Render(k[1]))
 	}
-	lines = append(lines, th.Styles.Header.Render("COMMANDS"))
+	// The palette owns the command catalogue; help only names it (no
+	// slash prefixes: commands are picked from the palette, not typed).
+	lines = append(lines, th.Styles.Header.Render("COMMANDS (ctrl+p)"))
 	lines = append(lines,
-		wrapStyled(th.Styles.Panel, "  "+strings.Join(helpCommands(false), " "), innerW)...)
-	lines = append(lines,
-		wrapStyled(th.Styles.Panel, "  "+strings.Join(helpCommands(true), " "), innerW)...)
-	lines = append(lines, th.Styles.Muted.Render("enter or esc closes · /help toggles"))
+		wrapStyled(th.Styles.Panel, "  "+strings.Join(paletteNames(ChannelIC), " · "), innerW)...)
+	lines = append(lines, th.Styles.Muted.Render("enter or esc closes · ctrl+p lists commands"))
 
 	// Clip to the box the border will add, so the overlay always occupies
 	// exactly height lines.

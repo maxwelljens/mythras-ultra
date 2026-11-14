@@ -30,14 +30,18 @@ type Options struct {
 	SessionName string
 	// ModelName labels the language model in the header.
 	ModelName string
+	// InitialChannel is the channel the input line starts on — the
+	// session's last-used mode (Session.LastChannel). The zero value is
+	// ChannelIC, the default for a session with no saved mode.
+	InitialChannel Channel
 }
 
 // entry is one transcript item together with its cached rendering. width is
 // the chat width the text was rendered for; a mismatch triggers a re-render.
-// player marks a harness echo of the player's own message, rendered with the
-// speaker tag instead of the GM's. tagged reports whether the cached text
-// carries the tag line: only the first entry of a run of messages from the
-// same speaker on the same channel shows its tags (see tagVisibility).
+// player marks a harness echo of the player's own message, tagged "You"
+// rather than "GM". tagged reports whether the cached text carries the tag
+// line: only the first entry of a run of messages from the same speaker on
+// the same channel shows its tags (see tagVisibility).
 type entry struct {
 	ev     Event
 	player bool
@@ -76,8 +80,16 @@ type App struct {
 
 	panelOpen bool
 	helpOpen  bool
-	meta      Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
-	echoes    []string // recently sent texts awaiting their harness echo
+	sheetOpen bool // the view-only character sheet overlay (palette action)
+	// sheetScroll is the sheet overlay's own scroll position; it never
+	// touches the transcript viewport or follow mode.
+	sheetScroll int
+	// argMode names the command whose argument the input line is
+	// collecting (only "roll"); "" means a normal chat line.
+	argMode string
+	pal     palette  // the ctrl+p command palette (closed by default)
+	meta    Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
+	echoes  []string // recently sent texts awaiting their harness echo
 
 	width  int
 	height int
@@ -99,6 +111,13 @@ type (
 		err  error
 		text string // the sent text, to withdraw its echo on failure
 	}
+	// commandResultMsg reports the outcome of an asynchronous
+	// Driver.Command issued from the palette or the input line's
+	// argument mode.
+	commandResultMsg struct {
+		err  error
+		name string // the command that was run, for the error line
+	}
 )
 
 // maxEchoes bounds how many sent messages are remembered for echo
@@ -118,7 +137,7 @@ func New(d Driver, opts Options) *App {
 		driver:    d,
 		opts:      opts,
 		themeName: opts.Theme,
-		channel:   ChannelIC,
+		channel:   opts.InitialChannel,
 		follow:    true,
 		panelOpen: opts.MetadataDefault,
 		viewport: viewport.New(
@@ -134,6 +153,7 @@ func New(d Driver, opts Options) *App {
 	a.input = textinput.New()
 	a.input.Prompt = promptFor(a.channel)
 	a.input.Focus() // the input line starts focused; Init issues the blink command
+	a.pal = newPalette()
 
 	th, err := Get(a.themeName)
 	if err != nil {
@@ -143,6 +163,7 @@ func New(d Driver, opts Options) *App {
 	}
 	a.theme = th
 	a.applyInputStyles()
+	a.pal.applyStyles(th)
 	a.throb = newThrobber(th)
 	a.dice = NewDiceTheatre(th, opts.DiceAnimation)
 	a.refreshMetadata()
@@ -187,6 +208,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case commandResultMsg:
+		if msg.err != nil {
+			a.errorLine(fmt.Errorf("command %s failed: %w", msg.name, msg.err))
+		}
+		return a, nil
+
 	case metadataTickMsg:
 		a.refreshMetadata()
 		return a, a.metadataTick()
@@ -213,6 +240,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleKey(msg)
 
 	case tea.MouseWheelMsg:
+		// While the sheet overlay is up the wheel scrolls it; the
+		// transcript keeps its own position and follow mode untouched.
+		if a.sheetOpen {
+			a.scrollSheet(wheelDelta(msg))
+			return a, nil
+		}
 		vp, cmd := a.viewport.Update(msg)
 		a.viewport = vp
 		a.follow = a.viewport.AtBottom()
@@ -235,6 +268,13 @@ func (a *App) View() tea.View {
 		bodyH = 1
 	}
 	switch {
+	case a.sheetOpen:
+		// The sheet replaces transcript and panel entirely; it has its
+		// own scroll (see renderSheet).
+		body = a.renderSheet()
+	case a.pal.open:
+		// The palette sits over the transcript like the help modal.
+		body = a.pal.view(a.theme, a.width, bodyH)
 	case a.helpOpen:
 		// The overlay takes the transcript area; the chat waits behind it.
 		body = renderHelp(a.theme, a.width, bodyH)
@@ -285,12 +325,22 @@ func (a *App) requestEvents() tea.Cmd {
 	}
 }
 
-// handleKey dispatches a key press: the help overlay captures everything
-// first, then global shortcuts, then history and scrolling, with everything
-// else handed to the input line.
+// handleKey dispatches a key press: the palette, help and sheet overlays
+// capture keys first (one overlay at a time), then the argument mode
+// collects its expression, then global shortcuts, then history and
+// scrolling, with everything else handed to the input line.
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if a.pal.open {
+		return a.handlePaletteKey(msg)
+	}
 	if a.helpOpen {
 		return a.handleHelpKey(msg)
+	}
+	if a.sheetOpen {
+		return a.handleSheetKey(msg)
+	}
+	if a.argMode != "" {
+		return a.handleArgKey(msg)
 	}
 	switch k := msg.String(); k {
 	case "ctrl+c":
@@ -299,15 +349,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.toggleChannel()
 		return a, nil
 	case "ctrl+m":
-		a.panelOpen = !a.panelOpen
-		a.refreshMetadata()
-		a.relayout()
+		a.togglePanel()
 		return a, nil
 	case "ctrl+e":
 		return a, a.openEditor()
 	case "ctrl+l":
 		a.clearTranscript()
 		return a, nil
+	case "ctrl+p":
+		return a, a.openPalette()
 	case "enter":
 		return a, a.submit()
 	case "up":
@@ -336,22 +386,191 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// handleHelpKey runs while the help overlay is up. esc and enter dismiss it
-// (an enter on a freshly typed "/help" clears that line too, so the dismiss
-// keystroke never lingers as sendable text), ctrl+c still quits, and every
-// other key reaches only the input line — shortcuts stay captured, but the
-// player can still type their next message or "/help" while reading.
-func (a *App) handleHelpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+// togglePanel flips the metadata panel (ctrl+m): a plain two-state view
+// toggle that behaves the same under every overlay.
+func (a *App) togglePanel() {
+	a.panelOpen = !a.panelOpen
+	a.refreshMetadata()
+	a.relayout()
+}
+
+// handlePaletteKey runs while the command palette is up: ctrl+c still
+// quits, enter executes the selection (the palette closes first), esc or
+// ctrl+p close it, and every other key — q included — only filters.
+func (a *App) handlePaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch a.pal.handleKey(msg) {
+	case outQuit:
+		return a, tea.Quit
+	case outChosen:
+		c, ok := a.pal.selected()
+		a.pal.close()
+		if !ok {
+			return a, nil
+		}
+		return a, a.executePalette(c)
+	default: // outFilter or outClose: the palette state changed only
+		return a, nil
+	}
+}
+
+// openPalette shows the command palette. Only one overlay is ever up:
+// help and the sheet close first, and the catalogue is rebuilt for the
+// current channel so its dynamic entries (the channel switch) are current.
+func (a *App) openPalette() tea.Cmd {
+	a.helpOpen = false
+	a.sheetOpen = false
+	a.pal.applyStyles(a.theme)
+	return a.pal.openWith(PaletteCommands(a.channel))
+}
+
+// executePalette runs one palette entry. Local actions (actNone entries
+// excepted) act on the app's own view state and never reach the session —
+// the character sheet is view-only by design; entries carrying a Session
+// name run over Driver.Command; Roll dice switches the input line into
+// argument mode instead, so its expression arrives on Enter.
+func (a *App) executePalette(c PaletteCommand) tea.Cmd {
+	switch c.local {
+	case actSheet:
+		a.openSheet()
+		return nil
+	case actClear:
+		a.clearTranscript()
+		return nil
+	case actHelp:
+		a.helpOpen = true
+		return nil
+	case actEditor:
+		return a.openEditor()
+	case actQuit:
+		return tea.Quit
+	case actChannelIC:
+		a.setChannel(ChannelIC)
+		return nil
+	case actChannelOOC:
+		a.setChannel(ChannelOOC)
+		return nil
+	case actTheme:
+		a.applyThemeName(c.arg)
+		return nil
+	case actRollArg:
+		a.beginArg(c.Session)
+		return nil
+	default:
+		if c.Session == "" {
+			return nil
+		}
+		return a.command(c.Session)
+	}
+}
+
+// command returns the command that runs a named Driver.Command off the
+// update loop; the outcome (if any) arrives as a commandResultMsg. It
+// reports a missing driver as an error line instead of a panic.
+func (a *App) command(name string, args ...string) tea.Cmd {
+	d := a.driver
+	if d == nil {
+		a.errorLine(errors.New("cannot run command: no harness driver connected"))
+		return nil
+	}
+	return func() tea.Msg {
+		return commandResultMsg{err: d.Command(name, args...), name: name}
+	}
+}
+
+// beginArg puts the input line into argument mode for a command that needs
+// one (only "roll" does): the prompt becomes "expr ▸ ", the line starts
+// empty, esc cancels back to the channel prompt and enter runs
+// Driver.Command(name, expr).
+func (a *App) beginArg(name string) {
+	a.argMode = name
+	a.input.Reset()
+	a.input.Prompt = argPrompt
+	a.sizeInput()
+}
+
+// cancelArg leaves argument mode, restoring the channel prompt.
+func (a *App) cancelArg() {
+	if a.argMode == "" {
+		return
+	}
+	a.argMode = ""
+	a.input.Prompt = promptFor(a.channel)
+	a.sizeInput()
+}
+
+// handleArgKey runs while the input line collects a command argument: enter
+// runs the command (an empty line cancels), esc cancels, ctrl+c quits, and
+// every other key — q and history included — only types into the line.
+func (a *App) handleArgKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return a, tea.Quit
 	case "esc":
+		a.cancelArg()
+		return a, nil
+	case "enter":
+		expr := strings.TrimSpace(a.input.Value())
+		name := a.argMode
+		a.input.Reset()
+		if expr == "" {
+			a.cancelArg()
+			return a, nil
+		}
+		a.cancelArg()
+		return a, a.command(name, expr)
+	case "pgup", "pgdown":
+		vp, cmd := a.viewport.Update(msg)
+		a.viewport = vp
+		a.follow = a.viewport.AtBottom()
+		return a, cmd
+	}
+	ti, cmd := a.input.Update(msg)
+	a.input = ti
+	return a, cmd
+}
+
+// handleSheetKey runs while the character sheet overlay is up: esc closes
+// it, pgup/pgdn scroll it, ctrl+p swaps to the palette (closing it), the
+// panel toggle keeps working, and every other key reaches the input line —
+// the sheet is view-only, so the player can still type their next message.
+func (a *App) handleSheetKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch k := msg.String(); k {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "esc":
+		a.closeSheet()
+		return a, nil
+	case "ctrl+p":
+		return a, a.openPalette()
+	case "ctrl+m":
+		a.togglePanel()
+		return a, nil
+	case "pgup", "pgdown":
+		a.scrollSheet(a.sheetPage(k == "pgup"))
+		return a, nil
+	case "enter":
+		// The sheet is view-only: a typed message still sends normally.
+		return a, a.submit()
+	}
+	ti, cmd := a.input.Update(msg)
+	a.input = ti
+	return a, cmd
+}
+
+// handleHelpKey runs while the help overlay is up. esc and enter dismiss
+// it, ctrl+c still quits, ctrl+p swaps to the command palette, and every
+// other key reaches only the input line — shortcuts stay captured, but the
+// player can still type their next message while reading.
+func (a *App) handleHelpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "ctrl+p":
+		return a, a.openPalette()
+	case "esc":
 		a.helpOpen = false
 		return a, nil
 	case "enter":
-		if strings.EqualFold(strings.TrimSpace(a.input.Value()), "/help") {
-			a.input.Reset()
-		}
 		a.helpOpen = false
 		return a, nil
 	}
@@ -360,9 +579,11 @@ func (a *App) handleHelpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// submit validates the input line: empty input is ignored, slash commands are
-// parsed and dispatched, and everything else is sent to the harness on the
-// current channel. The input is recorded in local history either way.
+// submit sends the input line to the harness as a chat message — always.
+// Typed text is never parsed for commands: prose that looks like "/save"
+// reaches the model as prose, and commands come from the palette
+// (Driver.Command) instead. Empty input is ignored; the text is recorded in
+// local history either way.
 func (a *App) submit() tea.Cmd {
 	text := a.input.Value()
 	if text == "" {
@@ -372,49 +593,10 @@ func (a *App) submit() tea.Cmd {
 	a.history = append(a.history, text)
 	a.histIdx = len(a.history)
 
-	cmd, err := ParseInput(text)
-	if err != nil {
-		a.errorLine(err)
-		return nil
-	}
-	switch cmd.Kind {
-	case CmdIC:
-		a.setChannel(ChannelIC)
-		return nil
-	case CmdOOC:
-		a.setChannel(ChannelOOC)
-		return nil
-	case CmdTheme:
-		th, err := Get(cmd.Args[0])
-		if err != nil {
-			a.errorLine(err)
-			return nil
-		}
-		a.themeName = th.Name
-		a.applyTheme()
-		a.systemLine("theme → " + th.Name)
-		return nil
-	case CmdEditor:
-		return a.openEditor()
-	case CmdClear:
-		a.clearTranscript()
-		return nil
-	case CmdHelp:
-		// The overlay lists keys and commands; while it is up the enter key
-		// closes it (handleHelpKey), so the toggle mostly serves the open.
-		a.helpOpen = !a.helpOpen
-		return nil
-	case CmdQuit:
-		return tea.Quit
-	default:
-		// CmdMessage and the harness commands (/roll, /save, /recap, /meta)
-		// go to the driver verbatim; the harness interprets the latter when
-		// they are wired to engine moves. The text is remembered so the
-		// harness's echo of the player's own message can be recognised when
-		// it comes back through Events.
-		a.recordEcho(text)
-		return a.send(text)
-	}
+	// The text is remembered so the harness's echo of the player's own
+	// message can be recognised when it comes back through Events.
+	a.recordEcho(text)
+	return a.send(text)
 }
 
 // send returns the command that delivers text to the harness off the update
@@ -432,11 +614,18 @@ func (a *App) send(text string) tea.Cmd {
 }
 
 // setChannel switches the input line to another channel, updating its prompt
-// and width (the prompt lengths differ).
+// and width (the prompt lengths differ), and reports the new mode to the
+// driver so it survives a restart. That report is best-effort: the channel
+// is only a UI hint, so a driver error (a closed session, a failed
+// meta.json write) is absorbed here rather than surfaced as a scary
+// transcript line — the in-memory switch above already succeeded.
 func (a *App) setChannel(c Channel) {
 	a.channel = c
 	a.input.Prompt = promptFor(c)
 	a.sizeInput()
+	if a.driver != nil {
+		_ = a.driver.SetChannel(c)
+	}
 }
 
 // toggleChannel flips between the IC and OOC channels (ctrl+t).
@@ -447,6 +636,10 @@ func (a *App) toggleChannel() {
 		a.setChannel(ChannelIC)
 	}
 }
+
+// argPrompt is the input prompt while the line collects a command
+// argument (see beginArg).
+const argPrompt = "expr ▸ "
 
 // promptFor returns the input prompt for a channel.
 func promptFor(c Channel) string {
@@ -483,7 +676,8 @@ func (a *App) historyDown() {
 	a.input.CursorEnd()
 }
 
-// clearTranscript drops the local transcript view (ctrl+l, /clear). The
+// clearTranscript drops the local transcript view (ctrl+l, the palette's
+// Clear screen). The
 // harness keeps its own record; this only clears what the TUI renders, and
 // follow mode is re-armed.
 func (a *App) clearTranscript() {
@@ -590,7 +784,7 @@ func (a *App) ingest(ev Event) tea.Cmd {
 		// The model's first words after EventThinking: it is writing now.
 		cmd = tea.Batch(cmd, a.throb.setState(throbWriting))
 	case ev.Kind == EventToolAnnotation && a.throb.state != throbIdle:
-		// The round is dispatched and the model re-invoked; a local slash
+		// The round is dispatched and the model re-invoked; a local
 		// command's annotation (no turn running) must not start one.
 		cmd = tea.Batch(cmd, a.throb.setState(throbThinking))
 	}
@@ -778,9 +972,24 @@ func (a *App) applyTheme() {
 	}
 	a.theme = th
 	a.applyInputStyles()
+	a.pal.applyStyles(th)
 	a.throb.setTheme(th)
 	a.dice.SetTheme(th)
 	a.rerender()
+}
+
+// applyThemeName switches to a named theme and reports it on the
+// transcript. An unknown name surfaces as an error line — defensive only:
+// the palette offers the built-in names exclusively.
+func (a *App) applyThemeName(name string) {
+	th, err := Get(name)
+	if err != nil {
+		a.errorLine(err)
+		return
+	}
+	a.themeName = th.Name
+	a.applyTheme()
+	a.systemLine("theme → " + th.Name)
 }
 
 // applyInputStyles pushes the theme's input styles into the text input.
@@ -816,7 +1025,7 @@ func isSpeakerTurn(k EventKind) bool {
 }
 
 // tagVisibility reports, for every transcript entry, whether it must show
-// its speaker tags ("[ooc]", "You"). A tag appears only where a run
+// its speaker tags ("[ooc]", "You", "GM"). A tag appears only where a run
 // begins: the first entry, and any entry whose channel or speaker differs
 // from the last speaking entry before it. Callers render tags on whenever
 // the width is unknown (renderEvent forces them at w < 1), so no sender or
@@ -845,10 +1054,12 @@ func tagVisibility(entries []entry) []bool {
 // (w < 1 means "not laid out yet": markdown falls back to a default wrap,
 // single-line renderings are not clipped, and tags are always shown).
 // player marks the event as the harness's echo of the player's own message,
-// which is tagged "You" through the speaker style; out-of-character lines
-// keep their "[ooc]" tag either way. tagged reports whether this entry
-// starts a run (see tagVisibility): only that entry carries the tag line,
-// so a streamed run of paragraphs is annotated once, not per paragraph.
+// which is tagged "You" through the speaker style; GM narration is tagged
+// "GM" the same way; out-of-character lines keep their "[ooc]" tag either
+// way, and system/error lines never carry a speaker tag. tagged reports
+// whether this entry starts a run (see tagVisibility): only that entry
+// carries the tag line, so a streamed run of paragraphs is annotated once,
+// not per paragraph.
 func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 	wrap := w
 	if wrap < 1 {
@@ -878,11 +1089,21 @@ func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 	if ev.Channel == ChannelOOC {
 		tags = append(tags, "[ooc]")
 	}
-	if player {
+	switch {
+	case player:
 		tags = append(tags, "You")
+	case ev.Kind == EventNarrative:
+		// GM narration opens its run with a speaker tag of its own, so
+		// both sides of the table are named; system and error lines
+		// carry no speaker.
+		tags = append(tags, "GM")
 	}
 	if tagged && len(tags) > 0 {
-		body = a.theme.Styles.Speaker.Render(strings.Join(tags, " ")) + "\n" + body
+		// Trim the body's edge newlines: glamour renders blocks with a
+		// leading newline, which would otherwise sit between the tag line
+		// and its text (the player's dimmed block is trimmed already).
+		body = a.theme.Styles.Speaker.Render(strings.Join(tags, " ")) +
+			"\n" + strings.Trim(body, "\n")
 	}
 	return body
 }
@@ -1041,10 +1262,14 @@ func (a *App) channelSwitch() string {
 	return ic.Render("IC") + " " + ooc.Render("[OOC]")
 }
 
-// renderFooter builds the terse keybinding hints.
+// renderFooter builds the terse keybinding hints. The full key list lives
+// in the help overlay (and the sheet swaps in its own hint while up), so
+// the footer stays one short line.
 func (a *App) renderFooter() string {
-	hints := "enter send · ctrl+t ic/ooc · ctrl+m meta · ctrl+e editor · " +
-		"ctrl+l clear · pgup/pgdn scroll · q/ctrl+c quit · /help"
+	hints := "enter send · ctrl+c quit · ctrl+p commands"
+	if a.sheetOpen {
+		hints = "esc close · pgup/pgdn scroll"
+	}
 	return fit(a.theme.Styles.Footer, hints, a.width)
 }
 

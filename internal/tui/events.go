@@ -79,6 +79,40 @@ type DiceEvent struct {
 	Outcome string
 }
 
+// NameValue is one labelled character-sheet row: a name ("STR", "Dodge")
+// and its display-ready value, both formatted by the session that built it.
+type NameValue struct {
+	Name  string
+	Value string
+}
+
+// Sheet is the full character sheet behind the sheet overlay: display-ready,
+// consumer-side data assembled by the session from engine state (the TUI
+// never derives numbers). Characteristics keep the fixed STR CON SIZ DEX INT
+// POW CHA order; Derived lists HP, Damage Modifier, Power Points, Luck and
+// Experience Bonus as the engine reports them; Skills, Styles and Passions
+// are sorted by value descending, then name. The zero value means "no
+// character yet" and renders the overlay's empty state.
+type Sheet struct {
+	// Name, Culture, Career, Age and Concept identify the character.
+	// Age is "" when the character records no age.
+	Name, Culture, Career, Age, Concept string
+	// Characteristics are the seven characteristics in fixed order.
+	Characteristics []NameValue
+	// Derived are the pooled derived readouts (HP, Damage Modifier,
+	// Power Points, Luck, Experience Bonus).
+	Derived []NameValue
+	// Skills lists assigned skills; Styles lists combat styles;
+	// Passions lists passions.
+	Skills, Styles, Passions []NameValue
+	// Inventory is the carried-item list (quantity/equip markers included).
+	Inventory []string
+	// Locations are the hit locations with live HP.
+	Locations []LocationHP
+	// Conditions lists active conditions (poisoned, prone, …).
+	Conditions []string
+}
+
 // LocationHP is one hit location's hit points as the metadata panel displays
 // them. Severity classifies the wound: "" (unhurt), "wound", "severe" or
 // "critical" — anything else renders with the neutral panel colour.
@@ -116,6 +150,9 @@ type Vitals struct {
 type Metadata struct {
 	// Character is the player character block.
 	Character Vitals
+	// Sheet is the full character-sheet block behind the sheet overlay;
+	// its zero value means "no character yet".
+	Sheet Sheet
 	// Inventory is the terse item list.
 	Inventory []string
 	// Scene is the current scene or location sentence.
@@ -143,8 +180,9 @@ type Event struct {
 	At         time.Time
 	// Player marks the player's own message: set by the harness on the
 	// echo it emits and on lines replayed from the log. The TUI dims
-	// player text and tags its run with "You", so authorship survives a
-	// save/resume where no send history exists to match against.
+	// player text and tags its run with "You" (a GM run with "GM"), so
+	// authorship survives a save/resume where no send history exists to
+	// match against.
 	Player bool
 }
 
@@ -159,6 +197,11 @@ type Event struct {
 //     an error line. On success the harness emits the player's message back
 //     through Events (an EventNarrative on the same channel) — the TUI does
 //     not echo input itself, the harness owns the transcript.
+//   - SetChannel reports the input line's current channel after every mode
+//     switch (ctrl+t, the palette's channel switch) so the harness can
+//     remember the last-used mode across sessions. It is a UI hint, never
+//     game state: the app calls it best-effort and absorbs its error
+//     instead of surfacing it, and after Close it must be a no-op.
 //   - A model turn is bracketed for the header throbber: the harness emits
 //     EventThinking before each model call and exactly one EventTurnEnd
 //     when the turn completes or aborts (error path included). Neither
@@ -172,6 +215,15 @@ type Event struct {
 //   - Close releases the driver's resources and closes the channel from
 //     Events. The app never calls it: ownership stays with whoever created
 //     the driver (the CLI closes it when the program exits).
+//   - A command is a local, named action the palette offers (save, recap,
+//     roll, meta): Command enqueues it and returns promptly; it must not
+//     block on the model or on the runner. Commands carry no player text,
+//     produce no echo, and never reach the model — an unknown name comes
+//     back through Events as an error line listing the known commands.
+//     After Close it returns a closed-session error (like Send does).
+//     TUI-local view actions (the sheet overlay, clear, theme,
+//     help, quit, the channel switch) never cross this interface — they
+//     are executed by the app itself.
 //   - Metadata returns the snapshot behind the metadata panel. It must be
 //     cheap and non-blocking (a read-through of state, never a model call)
 //     and safe on the update loop: the app refreshes it on every processed
@@ -179,10 +231,20 @@ type Event struct {
 //     only renders what it returns, including the zero value.
 //
 // Send must be safe to call from the command goroutine Bubble Tea runs tea.Cmd
-// functions on, concurrently with Events.
+// functions on, concurrently with Events; SetChannel is called on the update
+// loop and must be cheap and non-blocking. Command shares Send's goroutine
+// rules: the app calls it from a tea.Cmd, never from the update loop.
 type Driver interface {
 	// Send queues the player's text on ch for the harness.
 	Send(ctx context.Context, ch Channel, text string) error
+	// Command queues one named local command (save, recap, roll, meta)
+	// for the harness on the player's current channel.
+	Command(name string, args ...string) error
+	// SetChannel records the player's current IC/OOC mode. Implementations
+	// persist it so a resumed session reopens on the same channel; the app
+	// calls it best-effort after every mode switch and never surfaces its
+	// error, so it must be a no-op once the driver is closed.
+	SetChannel(ch Channel) error
 	// Events returns the stream of harness events (same channel per call).
 	Events() <-chan Event
 	// Metadata returns the current display snapshot for the metadata panel.
