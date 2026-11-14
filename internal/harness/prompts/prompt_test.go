@@ -35,7 +35,7 @@ func TestAssembleDefaultPrompt(t *testing.T) {
 		"masterful GM",
 		"second person, present tense",
 		"never put words in their mouth",
-		"write the message, not the marker",
+		"Never write `[ic]`/`[ooc]` tags or any other metadata",
 		"Mechanics discipline (non-negotiable)",
 		"rules_lookup",
 		"IMPOSSIBLE:",
