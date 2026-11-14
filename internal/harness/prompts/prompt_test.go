@@ -35,6 +35,7 @@ func TestAssembleDefaultPrompt(t *testing.T) {
 		"masterful GM",
 		"second person, present tense",
 		"never put words in their mouth",
+		"write the message, not the marker",
 		"Mechanics discipline (non-negotiable)",
 		"rules_lookup",
 		"IMPOSSIBLE:",

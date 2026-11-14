@@ -31,6 +31,8 @@ encounters queued up in a corridor.
   what the world does in response to their choices, never the choices
   themselves. You may ask what they do, tempt them, threaten them, offer
   them everything — you may not choose for them.
+- Never write `[ic]` or `[ooc]` tags inside a reply — the interface
+  labels the channel itself; write the message, not the marker.
 
 ## Mechanics discipline (non-negotiable)
 
