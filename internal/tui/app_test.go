@@ -1402,3 +1402,169 @@ func TestReplayedNarrativeLeavesTurnStateAlone(t *testing.T) {
 		t.Errorf("echo list = %v, want the outstanding echo untouched by replay", a.echoes)
 	}
 }
+
+// TestConfirmMode pins the input line's confirm mode (the roll arg-mode
+// pattern): an EventConfirm files its question as one styled, width-clipped
+// transcript line and switches the prompt to "N/y ▸ "; y/Y answer y and
+// leave the line (the echo arrives next), n/N/enter/esc answer n, leave the
+// line and return the held message to it unsent, every other key is
+// ignored, and ctrl+c still quits.
+func TestConfirmMode(t *testing.T) {
+	const (
+		question = "You are in IC mode, but your response looks like a message for OOC. Is this correct? N/y"
+		held     = "I slide the forged writ across the table."
+	)
+	// ask feeds one EventConfirm to the app, as the harness emits it.
+	ask := func(t *testing.T, a *App, md string) {
+		t.Helper()
+		_, _ = a.Update(eventMsg{ev: Event{
+			Kind: EventConfirm, Channel: ChannelIC, Markdown: md, ConfirmText: held,
+		}})
+	}
+	// answer runs the command a key produced, off the update loop.
+	answer := func(t *testing.T, cmd tea.Cmd) {
+		t.Helper()
+		if cmd == nil {
+			t.Fatal("the answer key should produce a command")
+		}
+		_ = cmd()
+	}
+	wantCommand := func(d *fakeDriver, want string) bool {
+		return len(d.commands) == 1 && d.commands[0].name == "confirm" &&
+			len(d.commands[0].args) == 1 && d.commands[0].args[0] == want
+	}
+
+	t.Run("question renders and the prompt switches", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 100, 24)
+		ask(t, a, question)
+		if !a.confirm {
+			t.Fatal("confirm mode should be on")
+		}
+		if a.input.Prompt != "N/y ▸ " {
+			t.Errorf("prompt = %q, want %q", a.input.Prompt, "N/y ▸ ")
+		}
+		if got := plain(view(a)); !strings.Contains(got, question) {
+			t.Errorf("the question should render, view:\n%s", got)
+		}
+		last := a.entries[len(a.entries)-1]
+		if last.ev.Kind != EventConfirm || last.ev.ConfirmText != held {
+			t.Fatalf("last entry = %+v, want the confirm question with its held text", last.ev)
+		}
+		if strings.Contains(last.text, "\n") {
+			t.Errorf("the question must render as one line, got %q", last.text)
+		}
+		if last.text == plain(last.text) {
+			t.Error("the question should be styled, not plain text")
+		}
+	})
+
+	t.Run("a long question clips to the chat width", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 60, 24)
+		ask(t, a, strings.Repeat("channel check ", 12))
+		last := a.entries[len(a.entries)-1]
+		if w := lipgloss.Width(last.text); w > a.chatW {
+			t.Errorf("question rendered %d columns, want at most %d", w, a.chatW)
+		}
+		if strings.Contains(last.text, "\n") {
+			t.Errorf("a clipped question must stay one line, got %q", last.text)
+		}
+	})
+
+	t.Run("y and Y answer y and leave the line", func(t *testing.T) {
+		for _, k := range []tea.KeyPressMsg{key('y'), key('Y')} {
+			a, d := newTestApp(t, Options{}, 80, 24)
+			ask(t, a, question)
+			answer(t, press(t, a, k))
+			if !wantCommand(d, "y") {
+				t.Fatalf("%s: commands = %+v, want confirm y", k.String(), d.commands)
+			}
+			if a.confirm || a.input.Prompt != "> " {
+				t.Errorf("%s: confirm=%v prompt=%q, want the normal line", k.String(), a.confirm, a.input.Prompt)
+			}
+			if a.input.Value() != "" {
+				t.Errorf("%s: input = %q, want it untouched — y does not restore the text", k.String(), a.input.Value())
+			}
+		}
+	})
+
+	t.Run("n, N, enter and esc answer n and restore the held text", func(t *testing.T) {
+		keys := []struct {
+			name string
+			msg  tea.KeyPressMsg
+		}{
+			{"n", key('n')},
+			{"N", key('N')},
+			{"enter", tea.KeyPressMsg{Code: tea.KeyEnter}},
+			{"esc", tea.KeyPressMsg{Code: tea.KeyEsc}},
+		}
+		for _, k := range keys {
+			t.Run(k.name, func(t *testing.T) {
+				a, d := newTestApp(t, Options{}, 80, 24)
+				ask(t, a, question)
+				answer(t, press(t, a, k.msg))
+				if !wantCommand(d, "n") {
+					t.Fatalf("commands = %+v, want confirm n", d.commands)
+				}
+				if a.confirm || a.input.Prompt != "> " {
+					t.Errorf("confirm=%v prompt=%q, want the normal line", a.confirm, a.input.Prompt)
+				}
+				if a.input.Value() != held {
+					t.Errorf("input = %q, want the held message returned unsent", a.input.Value())
+				}
+			})
+		}
+	})
+
+	t.Run("other keys are ignored while the answer is pending", func(t *testing.T) {
+		a, d := newTestApp(t, Options{}, 80, 24)
+		ask(t, a, question)
+		for _, k := range []tea.KeyPressMsg{
+			key('x'), key('q'),
+			tea.KeyPressMsg{Code: tea.KeyUp}, tea.KeyPressMsg{Code: tea.KeyDown},
+			tea.KeyPressMsg{Code: tea.KeyPgUp}, ctrl('t'), ctrl('p'), ctrl('m'),
+		} {
+			press(t, a, k)
+		}
+		if len(d.commands) != 0 || len(d.sends) != 0 {
+			t.Errorf("ignored keys reached the harness: commands=%+v sends=%+v", d.commands, d.sends)
+		}
+		if a.channel != ChannelIC {
+			t.Errorf("channel = %v, want ctrl+t ignored during a confirm", a.channel)
+		}
+		if a.pal.open || a.helpOpen {
+			t.Error("overlays must stay closed during a confirm")
+		}
+		if !a.confirm {
+			t.Fatal("the confirm should still be pending")
+		}
+		if a.input.Value() != "" {
+			t.Errorf("input = %q, want ignored keys kept out of the line", a.input.Value())
+		}
+	})
+
+	t.Run("ctrl+c still quits", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 24)
+		ask(t, a, question)
+		cmd := press(t, a, ctrl('c'))
+		if cmd == nil {
+			t.Fatal("ctrl+c should produce a quit command")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("ctrl+c from confirm mode should quit")
+		}
+	})
+
+	t.Run("esc at rest still clears the line", func(t *testing.T) {
+		a, _ := newTestApp(t, Options{}, 80, 24)
+		ask(t, a, question)
+		answer(t, press(t, a, key('n'))) // resolve the hold first
+		a.input.SetValue("draft")
+		press(t, a, tea.KeyPressMsg{Code: tea.KeyEsc})
+		if a.input.Value() != "" {
+			t.Errorf("input = %q, want esc at rest to clear it", a.input.Value())
+		}
+		if a.input.Prompt != "> " {
+			t.Errorf("prompt = %q, want the channel prompt back", a.input.Prompt)
+		}
+	})
+}

@@ -89,9 +89,15 @@ type App struct {
 	// argMode names the command whose argument the input line is
 	// collecting (only "roll"); "" means a normal chat line.
 	argMode string
-	pal     palette  // the ctrl+p command palette (closed by default)
-	meta    Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
-	echoes  []string // recently sent texts awaiting their harness echo
+	// confirm is set while an EventConfirm waits for its y/n answer: the
+	// input line shows confirmPrompt and only the answer keys (plus
+	// ctrl+c) reach the app. confirmText is the held message the answer
+	// decides about — "n" puts it back into the line.
+	confirm     bool
+	confirmText string
+	pal         palette  // the ctrl+p command palette (closed by default)
+	meta        Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
+	echoes      []string // recently sent texts awaiting their harness echo
 
 	width  int
 	height int
@@ -328,9 +334,10 @@ func (a *App) requestEvents() tea.Cmd {
 }
 
 // handleKey dispatches a key press: the palette, help and sheet overlays
-// capture keys first (one overlay at a time), then the argument mode
-// collects its expression, then global shortcuts, then history and
-// scrolling, with everything else handed to the input line.
+// capture keys first (one overlay at a time), then a pending channel check
+// takes its answer, then the argument mode collects its expression, then
+// global shortcuts, then history and scrolling, with everything else
+// handed to the input line.
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if a.pal.open {
 		return a.handlePaletteKey(msg)
@@ -340,6 +347,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.sheetOpen {
 		return a.handleSheetKey(msg)
+	}
+	if a.confirm {
+		return a.handleConfirmKey(msg)
 	}
 	if a.argMode != "" {
 		return a.handleArgKey(msg)
@@ -531,6 +541,61 @@ func (a *App) handleArgKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+// beginConfirm puts the input line into confirm mode for a pending
+// [EventConfirm]: the question is already on the transcript, the prompt
+// becomes "N/y ▸ ", and an open roll argument mode gives way — only the
+// answer may be typed until the hold resolves.
+func (a *App) beginConfirm(ev Event) {
+	a.cancelArg()
+	a.confirm = true
+	a.confirmText = ev.ConfirmText
+	a.input.Prompt = confirmPrompt
+	a.sizeInput()
+}
+
+// leaveConfirm ends confirm mode and restores the channel prompt. restore
+// puts the held message back into the input line (the "n" answer: the text
+// returns unsent), keeping any text the player had already typed so nothing
+// they wrote is lost.
+func (a *App) leaveConfirm(restored bool) {
+	if !a.confirm {
+		return
+	}
+	a.confirm = false
+	text := a.confirmText
+	a.confirmText = ""
+	a.input.Prompt = promptFor(a.channel)
+	if restored {
+		if cur := a.input.Value(); cur != "" {
+			text = text + " " + cur
+		}
+		a.input.SetValue(text)
+		a.input.CursorEnd()
+	}
+	a.sizeInput()
+}
+
+// handleConfirmKey runs while the input line answers a pending channel
+// check: y/Y sends the "y" answer and leaves the line (the harness echoes
+// the held message next), n/N/enter/esc sends "n", leaves the line and
+// returns the held text to it unsent, ctrl+c quits, and every other key is
+// ignored so the pending answer cannot be typed around.
+func (a *App) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "y", "Y":
+		cmd := a.command("confirm", "y")
+		a.leaveConfirm(false)
+		return a, cmd
+	case "n", "N", "enter", "esc":
+		cmd := a.command("confirm", "n")
+		a.leaveConfirm(true)
+		return a, cmd
+	}
+	return a, nil
+}
+
 // handleSheetKey runs while the character sheet overlay is up: esc closes
 // it, pgup/pgdn scroll it, ctrl+p swaps to the palette (closing it), the
 // panel toggle keeps working, and every other key reaches the input line —
@@ -642,6 +707,11 @@ func (a *App) toggleChannel() {
 // argPrompt is the input prompt while the line collects a command
 // argument (see beginArg).
 const argPrompt = "expr ▸ "
+
+// confirmPrompt is the input prompt while the line answers a pending
+// channel check (see beginConfirm): the default answer is n, so the
+// prompt reads "N/y" the way the question asks it.
+const confirmPrompt = "N/y ▸ "
 
 // promptFor returns the input prompt for a channel.
 func promptFor(c Channel) string {
@@ -771,6 +841,10 @@ func (a *App) ingest(ev Event) tea.Cmd {
 		return a.throb.setState(throbThinking)
 	case EventTurnEnd:
 		return a.throb.setState(throbIdle)
+	case EventConfirm:
+		// The question still appends below; entering confirm mode only
+		// switches the input line over to the pending answer.
+		a.beginConfirm(ev)
 	}
 	var cmd tea.Cmd
 	if ev.Kind == EventError {
@@ -983,9 +1057,10 @@ func (a *App) relayout() {
 }
 
 // sizeInput fits the text input to the window: the component's width covers
-// the value area only, so the prompt and the cursor cell are subtracted.
+// the value area only, so the current prompt (channel, argument or
+// confirm) and the cursor cell are subtracted.
 func (a *App) sizeInput() {
-	w := a.width - lipgloss.Width(promptFor(a.channel)) - 1
+	w := a.width - lipgloss.Width(a.input.Prompt) - 1
 	if w < 1 {
 		w = 1
 	}
@@ -1049,10 +1124,11 @@ type runKey struct {
 // isSpeakerTurn reports whether an event kind speaks in its own voice:
 // narrative, system and error lines carry words from the player or the GM,
 // while tool-annotation and dice strips are metadata inside the current
-// speaker's turn — they neither show tags nor break a run.
+// speaker's turn — they neither show tags nor break a run. The pending
+// channel-check question is the same kind of metadata: one untagged line.
 func isSpeakerTurn(k EventKind) bool {
 	switch k {
-	case EventToolAnnotation, EventDice:
+	case EventToolAnnotation, EventDice, EventConfirm:
 		return false
 	default:
 		return true
@@ -1116,6 +1192,10 @@ func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 		body = a.diceBanner(ev.Dice, w)
 	case EventError:
 		body = a.theme.Styles.Critical.Render("✗ " + a.wrapText(ev.Markdown, w))
+	case EventConfirm:
+		// The pending channel-check question: one styled line, clipped
+		// to the chat width (it never wraps into a paragraph).
+		body = fit(a.theme.Styles.Accent, ev.Markdown, w)
 	default:
 		// EventSystem, and any future kind we do not know yet: a muted line.
 		body = a.theme.Styles.Muted.Render(a.wrapText(ev.Markdown, w))

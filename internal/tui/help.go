@@ -54,7 +54,11 @@ func renderHelp(th Theme, width, height int) string {
 	lines = append(lines, th.Styles.Header.Render("COMMANDS (ctrl+p)"))
 	lines = append(lines,
 		wrapStyled(th.Styles.Panel, "  "+strings.Join(paletteNames(ChannelIC), " · "), innerW)...)
-	lines = append(lines, th.Styles.Muted.Render("enter or esc closes · ctrl+p lists commands"))
+	// The closing hint doubles as the only room for the channel check's
+	// answer key: a tenth row would push the command list out of an
+	// 80×20 window (help.go's fit budget), and ctrl+p is listed above.
+	lines = append(lines, th.Styles.Muted.Render(
+		"enter or esc closes · y/n answers a channel check · ctrl+p commands"))
 
 	// Clip to the box the border will add, so the overlay always occupies
 	// exactly height lines.

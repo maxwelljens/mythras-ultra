@@ -51,6 +51,12 @@ const (
 	// EventTurnEnd reports that a turn finished, successfully or not. It
 	// carries no transcript content: the header throbber returns to idle.
 	EventTurnEnd
+	// EventConfirm asks the player to answer a pending confirmation —
+	// the channel check's "N/y" question about a held message. Markdown
+	// is the question and ConfirmText the held text the answer decides
+	// about; while it stands the input line is in confirm mode and the
+	// runner waits for Command("confirm", "y"|"n").
+	EventConfirm
 )
 
 // Annotation describes one engine tool call for the annotation strip.
@@ -239,6 +245,11 @@ type Event struct {
 	// them to the last narrative entry on the same channel (starting a
 	// fresh entry instead when that entry cannot take it).
 	Continuation bool
+	// ConfirmText is the held player message an [EventConfirm] asks
+	// about: answering "n" puts it back into the input line unsent. It
+	// is only meaningful for EventConfirm; every other kind leaves it
+	// empty.
+	ConfirmText string
 }
 
 // Driver is the contract between the TUI and the game harness. The interface
@@ -270,8 +281,9 @@ type Event struct {
 //   - Close releases the driver's resources and closes the channel from
 //     Events. The app never calls it: ownership stays with whoever created
 //     the driver (the CLI closes it when the program exits).
-//   - A command is a local, named action the palette offers (save, recap,
-//     roll, meta): Command enqueues it and returns promptly; it must not
+//   - A command is a local, named action the palette offers, or an
+//     answer to a pending EventConfirm (save, recap, roll, meta,
+//     confirm): Command enqueues it and returns promptly; it must not
 //     block on the model or on the runner. Commands carry no player text,
 //     produce no echo, and never reach the model — an unknown name comes
 //     back through Events as an error line listing the known commands.
@@ -292,8 +304,8 @@ type Event struct {
 type Driver interface {
 	// Send queues the player's text on ch for the harness.
 	Send(ctx context.Context, ch Channel, text string) error
-	// Command queues one named local command (save, recap, roll, meta)
-	// for the harness on the player's current channel.
+	// Command queues one named local command (save, recap, roll, meta,
+	// confirm) for the harness on the player's current channel.
 	Command(name string, args ...string) error
 	// SetChannel records the player's current IC/OOC mode. Implementations
 	// persist it so a resumed session reopens on the same channel; the app
