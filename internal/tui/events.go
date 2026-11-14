@@ -141,6 +141,11 @@ type Event struct {
 	Annotation *Annotation
 	Dice       *DiceEvent
 	At         time.Time
+	// Player marks the player's own message: set by the harness on the
+	// echo it emits and on lines replayed from the log. The TUI dims
+	// player text and tags its run with "You", so authorship survives a
+	// save/resume where no send history exists to match against.
+	Player bool
 }
 
 // Driver is the contract between the TUI and the game harness. The interface

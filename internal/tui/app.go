@@ -581,8 +581,10 @@ func (a *App) ingest(ev Event) tea.Cmd {
 	if ev.Kind == EventDice && ev.Dice != nil {
 		return tea.Batch(cmd, a.startRoll(ev))
 	}
-	player := ev.Kind == EventNarrative && a.consumeEcho(ev.Markdown)
-	a.appendEvent(ev, player)
+	// Authorship: an explicit Player flag (echo or replayed line) wins;
+	// otherwise fall back to matching recently sent text.
+	matched := ev.Kind == EventNarrative && a.consumeEcho(ev.Markdown)
+	a.appendEvent(ev, ev.Player || matched)
 	switch {
 	case ev.Kind == EventNarrative && a.throb.state == throbThinking:
 		// The model's first words after EventThinking: it is writing now.
@@ -857,6 +859,11 @@ func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 	switch ev.Kind {
 	case EventNarrative:
 		body = a.renderMarkdown(ev.Markdown, wrap)
+		if player {
+			// Player-submitted text reads visibly dimmer than GM
+			// narration, so authorship is obvious at a glance.
+			body = faintBlock(body)
+		}
 	case EventToolAnnotation:
 		body = a.annotationStrip(ev.Annotation, w)
 	case EventDice:
@@ -902,6 +909,29 @@ func (a *App) renderMarkdown(md string, width int) string {
 		return a.theme.Styles.Narrative.Render(md)
 	}
 	return out
+}
+
+// faintReassert re-asserts the SGR faint attribute after every escape reset:
+// glamour and lipgloss reset the whole SGR state ("\x1b[m" / "\x1b[0m") when
+// they change style, which would otherwise switch faint back off mid-block
+// and let the rest of the text glow at full strength.
+var faintReassert = strings.NewReplacer(
+	"\x1b[0m", "\x1b[0m\x1b[2m",
+	"\x1b[m", "\x1b[m\x1b[2m",
+)
+
+// faintBlock dims one rendered narrative block (player-submitted text) by
+// re-asserting faint after every reset and closing with a clean reset, so
+// the next transcript entry is unaffected. Edges are trimmed to the same
+// normalisation syncViewport applies to every part — otherwise the wrapper's
+// trailing reset would hide the newlines from the trim and reintroduce the
+// double-blank-line bug.
+func faintBlock(s string) string {
+	s = strings.Trim(s, "\n")
+	if s == "" {
+		return s
+	}
+	return "\x1b[2m" + faintReassert.Replace(s) + "\x1b[0m"
 }
 
 // ensureMD returns the cached glamour renderer for the current width and

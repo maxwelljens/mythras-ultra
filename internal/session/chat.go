@@ -84,6 +84,7 @@ func (s *Session) loadReplay() {
 			Channel:  replayChannel(e.Chat.Channel),
 			Markdown: e.Chat.Text,
 			At:       e.At,
+			Player:   e.Chat.Player,
 		})
 	}
 }

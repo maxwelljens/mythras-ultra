@@ -93,7 +93,7 @@ func (s *Session) run() {
 // model, everything else is a model turn on the input's channel
 // (session-loop.md "Turn loop" step 1a–1b).
 func (s *Session) process(in input) {
-	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text}, true)
+	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: in.ch, Markdown: in.text, Player: true}, true)
 
 	cmd, err := tui.ParseInput(in.text)
 	if err != nil {
