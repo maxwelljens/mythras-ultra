@@ -71,6 +71,12 @@ type DecisionConfig struct {
 	// falls back to LLM judgment; nothing mechanical depends on it
 	// (ARCHITECTURE §3.3).
 	Enabled bool `mapstructure:"enabled"`
+	// ChannelCheck asks the decision model, before each player message
+	// is echoed, whether it belongs to the current IC/OOC channel and
+	// holds a disagreeing one (at 0.7+ confidence, 32+ characters) for a
+	// N/y confirmation. When false the runner skips the decide call
+	// entirely. It is a plain bool: any value validates.
+	ChannelCheck bool `mapstructure:"channel_check"`
 	// URL is the decision-model base URL.
 	URL string `mapstructure:"url"`
 	// Model is the decision model's name.
@@ -118,9 +124,10 @@ type UIConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Decision: DecisionConfig{
-			Enabled: true,
-			URL:     "http://localhost:11434",
-			Model:   "tev1:4b",
+			Enabled:      true,
+			ChannelCheck: true,
+			URL:          "http://localhost:11434",
+			Model:        "tev1:4b",
 		},
 		Game: GameConfig{
 			Seed:          0,
@@ -205,6 +212,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.base_url", "")
 	v.SetDefault("llm.context_window", 0)
 	v.SetDefault("decision.enabled", true)
+	v.SetDefault("decision.channel_check", true)
 	v.SetDefault("decision.url", "http://localhost:11434")
 	v.SetDefault("decision.model", "tev1:4b")
 	v.SetDefault("game.seed", 0)

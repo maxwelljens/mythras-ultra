@@ -480,6 +480,8 @@ base_url = ""
 # Optional tev1 decision model (Ollama); when unreachable the harness
 # falls back to LLM judgment.
 enabled = true
+# Channel check: hold a message of 32+ characters for N/y when the decision model (at least 0.7 confidence) calls it the other channel; false skips it.
+channel_check = true
 url = "http://localhost:11434"
 model = "tev1:4b"
 

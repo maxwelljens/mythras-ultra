@@ -40,6 +40,9 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.Decision.Enabled {
 		t.Error("decision.enabled default = false, want true")
 	}
+	if !cfg.Decision.ChannelCheck {
+		t.Error("decision.channel_check default = false, want true")
+	}
 	if want := "http://localhost:11434"; cfg.Decision.URL != want {
 		t.Errorf("decision.url default = %q, want %q", cfg.Decision.URL, want)
 	}
@@ -104,6 +107,7 @@ context_window = 128000
 
 [decision]
 enabled = false
+channel_check = false
 
 [game]
 seed = 42
@@ -131,6 +135,7 @@ persona = "/tmp/persona.md"
 					ContextWindow: 128000,
 				}
 				want.Decision.Enabled = false
+				want.Decision.ChannelCheck = false
 				want.Game.Seed = 42
 				want.Game.MaxToolRounds = 7
 				want.Game.HouseRules = map[string]bool{"crit_fumble": true}
