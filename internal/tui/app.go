@@ -89,15 +89,18 @@ type App struct {
 	// argMode names the command whose argument the input line is
 	// collecting (only "roll"); "" means a normal chat line.
 	argMode string
-	// confirm is set while an EventConfirm waits for its y/n answer: the
-	// input line shows confirmPrompt and only the answer keys (plus
-	// ctrl+c) reach the app. confirmText is the held message the answer
-	// decides about — "n" puts it back into the line.
-	confirm     bool
-	confirmText string
-	pal         palette  // the ctrl+p command palette (closed by default)
-	meta        Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
-	echoes      []string // recently sent texts awaiting their harness echo
+	// confirm is set while an EventConfirm or EventConfirmRegen waits for
+	// its y/n answer: the input line shows the matching prompt (confirmRegen
+	// picks the golden-rule "Y/n" line over the channel check's "N/y") and
+	// only the answer keys (plus ctrl+c) reach the app. confirmText is the
+	// held message the answer decides about — "n" puts it back into the
+	// line (it stays empty for a regeneration, which holds no draft).
+	confirm      bool
+	confirmRegen bool
+	confirmText  string
+	pal          palette  // the ctrl+p command palette (closed by default)
+	meta         Metadata // cached Driver.Metadata snapshot (see refreshMetadata)
+	echoes       []string // recently sent texts awaiting their harness echo
 
 	width  int
 	height int
@@ -334,8 +337,9 @@ func (a *App) requestEvents() tea.Cmd {
 }
 
 // handleKey dispatches a key press: the palette, help and sheet overlays
-// capture keys first (one overlay at a time), then a pending channel check
-// takes its answer, then the argument mode collects its expression, then
+// capture keys first (one overlay at a time), then a pending confirmation
+// takes its answer (the channel check's hold or the golden-rule
+// regeneration), then the argument mode collects its expression, then
 // global shortcuts, then history and scrolling, with everything else
 // handed to the input line.
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -542,26 +546,36 @@ func (a *App) handleArgKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // beginConfirm puts the input line into confirm mode for a pending
-// [EventConfirm]: the question is already on the transcript, the prompt
-// becomes "N/y ▸ ", and an open roll argument mode gives way — only the
-// answer may be typed until the hold resolves.
+// [EventConfirm] or [EventConfirmRegen]: the question is already on the
+// transcript, the prompt becomes the question's own default — "N/y ▸ " for
+// a channel hold (n counts unless the player says y), "Y/n ▸ " for a
+// golden-rule regeneration (y counts unless the player says n) — and an
+// open roll argument mode gives way — only the answer may be typed until
+// the confirmation resolves.
 func (a *App) beginConfirm(ev Event) {
 	a.cancelArg()
 	a.confirm = true
+	a.confirmRegen = ev.Kind == EventConfirmRegen
 	a.confirmText = ev.ConfirmText
-	a.input.Prompt = confirmPrompt
+	if a.confirmRegen {
+		a.input.Prompt = regenPrompt
+	} else {
+		a.input.Prompt = confirmPrompt
+	}
 	a.sizeInput()
 }
 
 // leaveConfirm ends confirm mode and restores the channel prompt. restore
-// puts the held message back into the input line (the "n" answer: the text
-// returns unsent), keeping any text the player had already typed so nothing
-// they wrote is lost.
+// puts the held message back into the input line (the channel check's "n"
+// answer: the text returns unsent), keeping any text the player had
+// already typed so nothing they wrote is lost; a regeneration holds no
+// draft, so its answers always leave restored false.
 func (a *App) leaveConfirm(restored bool) {
 	if !a.confirm {
 		return
 	}
 	a.confirm = false
+	a.confirmRegen = false
 	text := a.confirmText
 	a.confirmText = ""
 	a.input.Prompt = promptFor(a.channel)
@@ -575,12 +589,28 @@ func (a *App) leaveConfirm(restored bool) {
 	a.sizeInput()
 }
 
-// handleConfirmKey runs while the input line answers a pending channel
-// check: y/Y sends the "y" answer and leaves the line (the harness echoes
-// the held message next), n/N/enter/esc sends "n", leaves the line and
-// returns the held text to it unsent, ctrl+c quits, and every other key is
-// ignored so the pending answer cannot be typed around.
+// handleConfirmKey runs while the input line answers a pending
+// confirmation. The channel check answers y/Y with y and n/N/enter/esc
+// with n (returning the held text to the line unsent); the golden-rule
+// regeneration inverts the default — enter/y/Y regenerate, n/N/esc keep
+// the reply on screen (nothing to restore). ctrl+c quits and every other
+// key is ignored so the pending answer cannot be typed around.
 func (a *App) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if a.confirmRegen {
+		switch msg.String() {
+		case "ctrl+c":
+			return a, tea.Quit
+		case "enter", "y", "Y":
+			cmd := a.command("confirm", "y")
+			a.leaveConfirm(false)
+			return a, cmd
+		case "n", "N", "esc":
+			cmd := a.command("confirm", "n")
+			a.leaveConfirm(false)
+			return a, cmd
+		}
+		return a, nil
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return a, tea.Quit
@@ -713,6 +743,11 @@ const argPrompt = "expr ▸ "
 // prompt reads "N/y" the way the question asks it.
 const confirmPrompt = "N/y ▸ "
 
+// regenPrompt is the input prompt while the line answers a golden-rule
+// regeneration (see beginConfirm): the default answer is y, so the prompt
+// reads "Y/n" the way the question asks it — enter regenerates, n keeps.
+const regenPrompt = "Y/n ▸ "
+
 // promptFor returns the input prompt for a channel.
 func promptFor(c Channel) string {
 	if c == ChannelOOC {
@@ -841,9 +876,10 @@ func (a *App) ingest(ev Event) tea.Cmd {
 		return a.throb.setState(throbThinking)
 	case EventTurnEnd:
 		return a.throb.setState(throbIdle)
-	case EventConfirm:
+	case EventConfirm, EventConfirmRegen:
 		// The question still appends below; entering confirm mode only
-		// switches the input line over to the pending answer.
+		// switches the input line over to the pending answer (the two
+		// kinds differ in prompt and answer keys — see beginConfirm).
 		a.beginConfirm(ev)
 	}
 	var cmd tea.Cmd
@@ -859,11 +895,15 @@ func (a *App) ingest(ev Event) tea.Cmd {
 	}
 	// Authorship: an explicit Player flag (echo or replayed line) wins;
 	// otherwise fall back to matching recently sent text. A continuation
-	// belongs to the entry it extends and a replayed line is history —
-	// neither may claim an echo.
-	matched := ev.Kind == EventNarrative && !ev.Continuation && !ev.Replay &&
+	// belongs to the entry it extends, a replayed line is history and a
+	// golden-rule replacement is the GM's rewrite — none may claim an echo.
+	matched := ev.Kind == EventNarrative && !ev.Continuation && !ev.Replay && !ev.Replace &&
 		a.consumeEcho(ev.Markdown)
-	if !ev.Continuation || !a.extendEntry(ev) {
+	switch {
+	case ev.Kind == EventNarrative && ev.Replace:
+		// The rewritten reply swaps in for the message it replaces.
+		a.replaceEntry(ev)
+	case !ev.Continuation || !a.extendEntry(ev):
 		a.appendEvent(ev, ev.Player || matched)
 	}
 	switch {
@@ -898,6 +938,46 @@ func (a *App) extendEntry(ev Event) bool {
 	last.width = a.chatW
 	a.syncViewport()
 	return true
+}
+
+// replaceEntry swaps a golden-rule rewrite into the transcript: every
+// narrative entry carrying the replaced MsgSeq is removed — the
+// replacement files at the first one's position, so the rewritten message
+// keeps its place in the play — the run tags are recomputed and the
+// viewport refreshes (follow mode still keeps the bottom in view). A
+// ReplaceSeq nothing on screen carries (0, or an already-swapped message)
+// files the replacement at the end instead.
+func (a *App) replaceEntry(ev Event) {
+	idx := -1   // transcript slot the replacement files at
+	before := 0 // removed entries ahead of the theatre's filing spot
+	kept := make([]entry, 0, len(a.entries)+1)
+	for i, e := range a.entries {
+		if ev.ReplaceSeq != 0 && e.ev.Kind == EventNarrative && e.ev.MsgSeq == ev.ReplaceSeq {
+			if idx < 0 {
+				idx = len(kept) // the first removed entry's slot
+			}
+			if i < a.diceIdx {
+				before++
+			}
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if idx < 0 {
+		idx = len(kept)
+	}
+	// The theatre's filing position shifts with the entries around it:
+	// removals before it pull it forward, the insertion pushes it past idx.
+	a.diceIdx -= before
+	if a.diceIdx >= idx {
+		a.diceIdx++
+	}
+	kept = append(kept, entry{})
+	copy(kept[idx+1:], kept[idx:])
+	kept[idx] = entry{ev: ev, player: false, width: a.chatW}
+	a.entries = kept
+	a.retag()
+	a.syncViewport()
 }
 
 // startRoll puts ev on stage. One roll animates at a time: a roll arriving
@@ -1125,10 +1205,10 @@ type runKey struct {
 // narrative, system and error lines carry words from the player or the GM,
 // while tool-annotation and dice strips are metadata inside the current
 // speaker's turn — they neither show tags nor break a run. The pending
-// channel-check question is the same kind of metadata: one untagged line.
+// confirmation questions are the same kind of metadata: one untagged line.
 func isSpeakerTurn(k EventKind) bool {
 	switch k {
-	case EventToolAnnotation, EventDice, EventConfirm:
+	case EventToolAnnotation, EventDice, EventConfirm, EventConfirmRegen:
 		return false
 	default:
 		return true
@@ -1192,8 +1272,8 @@ func (a *App) renderEvent(ev Event, w int, player bool, tagged bool) string {
 		body = a.diceBanner(ev.Dice, w)
 	case EventError:
 		body = a.theme.Styles.Critical.Render("✗ " + a.wrapText(ev.Markdown, w))
-	case EventConfirm:
-		// The pending channel-check question: one styled line, clipped
+	case EventConfirm, EventConfirmRegen:
+		// The pending confirmation question: one styled line, clipped
 		// to the chat width (it never wraps into a paragraph).
 		body = fit(a.theme.Styles.Accent, ev.Markdown, w)
 	default:

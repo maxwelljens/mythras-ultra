@@ -57,6 +57,15 @@ const (
 	// about; while it stands the input line is in confirm mode and the
 	// runner waits for Command("confirm", "y"|"n").
 	EventConfirm
+	// EventConfirmRegen asks the player to answer the golden-rule check's
+	// "Y/n" regeneration question about the reply just streamed (the
+	// Game Master decided the player's character for them). Markdown is
+	// the exact question; unlike [EventConfirm] it carries no draft text
+	// (ConfirmText is empty — the reply on screen is what "n" keeps).
+	// While it stands the input line is in confirm mode with the "Y/n ▸ "
+	// prompt: enter/y/Y answer y, n/N/esc answer n, every other key is
+	// ignored; the runner waits for Command("confirm", "y"|"n").
+	EventConfirmRegen
 )
 
 // Annotation describes one engine tool call for the annotation strip.
@@ -247,9 +256,25 @@ type Event struct {
 	Continuation bool
 	// ConfirmText is the held player message an [EventConfirm] asks
 	// about: answering "n" puts it back into the input line unsent. It
-	// is only meaningful for EventConfirm; every other kind leaves it
-	// empty.
+	// is only meaningful for EventConfirm; every other kind —
+	// [EventConfirmRegen] included — leaves it empty.
 	ConfirmText string
+	// MsgSeq identifies the assistant message this event's narrative
+	// text belongs to: monotonic per assistant message within the
+	// session (0 = legacy/untracked, and every event that is not model
+	// narration). The golden-rule rewrite uses it to swap a rewritten
+	// message into the transcript and to retract the original on replay
+	// (state.ChatLine carries the same sequence).
+	MsgSeq int
+	// Replace marks a rewritten assistant message taking the place of
+	// the one named by ReplaceSeq: the TUI removes every narrative entry
+	// of that sequence, files this full text at the first one's position
+	// and re-renders the run tags. Only meaningful for EventNarrative.
+	Replace bool
+	// ReplaceSeq is the MsgSeq of the message a Replace event replaces;
+	// 0 means nothing tracked to replace, so the event files as a plain
+	// narrative entry.
+	ReplaceSeq int
 }
 
 // Driver is the contract between the TUI and the game harness. The interface
@@ -282,7 +307,8 @@ type Event struct {
 //     Events. The app never calls it: ownership stays with whoever created
 //     the driver (the CLI closes it when the program exits).
 //   - A command is a local, named action the palette offers, or an
-//     answer to a pending EventConfirm (save, recap, roll, meta,
+//     answer to a pending EventConfirm / EventConfirmRegen (save, recap,
+//     roll, meta,
 //     confirm): Command enqueues it and returns promptly; it must not
 //     block on the model or on the runner. Commands carry no player text,
 //     produce no echo, and never reach the model — an unknown name comes
