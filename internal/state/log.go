@@ -5,6 +5,27 @@ import (
 	"time"
 )
 
+// GoldenRuleCheckKind is the LogEntry.Kind of the session's golden-rule
+// decision audit: one entry per completed check of an assistant reply,
+// carrying {msg_seq, verdict, confidence, decision, attempt} in Move. It is
+// raw audit only — [RenderTranscript] skips this kind, so the play shows
+// the rewrite's note instead of the machinery behind it.
+const GoldenRuleCheckKind = "golden_rule_check"
+
+// Recorded chat kinds beyond "narrative" and "error" (all written by the
+// session layer, all neutral strings the state layer itself understands).
+const (
+	// ChatKindRetract is the ChatLine.Kind of an append-only tombstone:
+	// its MsgSeq names the assistant message whose recorded chat lines
+	// are superseded by a rewrite — the transcript and the replay hide
+	// exactly those lines and keep every other line. Text is empty.
+	ChatKindRetract = "retract"
+	// ChatKindNote is the ChatLine.Kind of a muted remark the play shows
+	// as its own line (a system event on replay) — e.g. the note left
+	// behind when the player accepts a rewritten reply.
+	ChatKindNote = "note"
+)
+
 // LogEntry is one line of a session's append-only log.jsonl: the move as
 // the caller marshalled it, the Result it produced (or the failure), keyed
 // by the state's EventSeq at the time — or, for Kind "chat", the play text
@@ -47,9 +68,18 @@ type ChatLine struct {
 	// GM's text.
 	Player bool `json:"player"`
 	// Kind is the event the line was recorded from: "narrative" or
-	// "error". Empty reads as "narrative".
+	// "error", plus the session's own line kinds "retract" (a tombstone
+	// hiding the lines of one MsgSeq) and "note" (a muted remark; see
+	// [ChatKindRetract] and [ChatKindNote]). Empty reads as "narrative".
 	Kind string `json:"kind,omitempty"`
+	// MsgSeq identifies the assistant message this line's text came from:
+	// monotonic per assistant message within the session, 0 for lines
+	// that predate the sequence (legacy logs) and for player echoes,
+	// which belong to no model message. A "retract" line's MsgSeq names
+	// the message it hides; a rewrite carries a fresh MsgSeq of its own.
+	MsgSeq int `json:"msg_seq,omitempty"`
 	// Text is the play text — the player's input verbatim, the GM's
-	// narrative after channel-tag sanitisation.
+	// narrative after channel-tag sanitisation. Empty on a "retract"
+	// tombstone.
 	Text string `json:"text"`
 }

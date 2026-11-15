@@ -32,6 +32,9 @@ const transcriptKeySkills = 5
 // order, and no wall time is read — the only timestamps are the session's
 // own CreatedAt and UpdatedAt in the header. Two renders of the same state
 // and log are byte-identical, so transcript.md regenerates from log.jsonl.
+// Rewrites are two-phase: lines hidden by a "retract" tombstone and the
+// golden-rule audit entries (Kind [GoldenRuleCheckKind]) never print — the
+// play shows the rewritten reply and its note.
 //
 // A nil state is rejected wrapping [ErrInvalidState]; an entry whose Result
 // payload is not a resolve.Result is rejected with its sequence number — a
@@ -55,8 +58,13 @@ func RenderTranscript(s *resolve.State, entries []LogEntry) (string, error) {
 	if len(entries) == 0 {
 		b.WriteString("(no moves recorded)\n")
 	}
+	// Two-phase render: the retracted message sequence numbers are known
+	// before any line prints, so a "retract" tombstone hides exactly the
+	// lines of the message it superseded — later lines (a rewrite, a
+	// note) always show, and logs without tombstones render as before.
+	retracted := retractedMsgSeqs(entries)
 	for i, e := range entries {
-		lines, err := renderEntry(e)
+		lines, err := renderEntry(e, retracted)
 		if err != nil {
 			return "", fmt.Errorf("state: transcript entry %d: %w", i+1, err)
 		}
@@ -93,14 +101,37 @@ func WriteTranscript(w io.Writer, s *resolve.State, entries []LogEntry) error {
 	return nil
 }
 
+// retractedMsgSeqs collects the MsgSeqs a "retract" tombstone hides: the
+// set of assistant messages whose recorded chat lines a rewrite superseded.
+// A tombstone with MsgSeq 0 (legacy — never written) retracts nothing, so
+// untracked logs stay fully visible.
+func retractedMsgSeqs(entries []LogEntry) map[int]bool {
+	var out map[int]bool
+	for _, e := range entries {
+		if e.Chat == nil || e.Chat.Kind != ChatKindRetract || e.Chat.MsgSeq == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[int]bool)
+		}
+		out[e.Chat.MsgSeq] = true
+	}
+	return out
+}
+
 // renderEntry renders one log entry as its markdown lines: a chat line as
-// its play text, otherwise the "kind — summary" head, then indented Facts
-// and Audit rolls/citations. Lines that would repeat verbatim within one
+// its play text (retracted lines and tombstones render nothing), the
+// golden-rule audit as nothing (raw log only — the play shows the rewrite's
+// note), otherwise the "kind — summary" head, then indented Facts and
+// Audit rolls/citations. Lines that would repeat verbatim within one
 // entry are emitted once (several moves record the same roll as both a
 // Fact and an Audit roll).
-func renderEntry(e LogEntry) ([]string, error) {
+func renderEntry(e LogEntry, retracted map[int]bool) ([]string, error) {
 	if e.Chat != nil {
-		return renderChat(e.Chat), nil
+		return renderChat(e.Chat, retracted), nil
+	}
+	if e.Kind == GoldenRuleCheckKind {
+		return nil, nil
 	}
 	kind := e.Kind
 	if kind == "" {
@@ -144,16 +175,28 @@ func renderEntry(e LogEntry) ([]string, error) {
 
 // renderChat renders one chat entry as its play line: the player's line
 // prefixed "**You:** ", the GM's narration (and recorded error text)
-// verbatim, in log order — so the play reads between the move annotations.
-// Trailing line breaks from stream flushes are trimmed (the entry loop
-// adds exactly one), keeping renders byte-identical line for line.
-func renderChat(c *ChatLine) []string {
+// verbatim, a note as its muted italic line, in log order — so the play
+// reads between the move annotations. Lines a "retract" tombstone hides
+// (and the tombstones themselves) render nothing, so a rewritten reply
+// shows only its final version while legacy lines (MsgSeq 0) are
+// unaffected. Trailing line breaks from stream flushes are trimmed (the
+// entry loop adds exactly one), keeping renders byte-identical line for line.
+func renderChat(c *ChatLine, retracted map[int]bool) []string {
+	if c.Kind == ChatKindRetract {
+		return nil
+	}
+	if c.MsgSeq != 0 && retracted[c.MsgSeq] {
+		return nil // superseded by a rewrite of that message
+	}
 	text := strings.TrimRight(c.Text, "\r\n")
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	if c.Player {
 		return []string{"**You:** " + text}
+	}
+	if c.Kind == ChatKindNote {
+		return []string{"*" + oneLine(text) + "*"}
 	}
 	return []string{text}
 }
