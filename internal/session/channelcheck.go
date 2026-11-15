@@ -56,16 +56,23 @@ func channelCheckState(text string) string {
 // unreachable, or answering badly — returns no question, so the gate never
 // blocks a message and never fails a turn. Confidence below
 // channelCheckMinConfidence and a verdict matching the channel pass
-// silently too.
+// silently too. The Decide call itself is bracketed by
+// [tui.EventDecideStart]/[tui.EventDecideStop] so the TUI can show it.
 func (s *Session) channelGate(ch tui.Channel, text string) (question string, ok bool) {
 	if !s.channelCheck || s.decision == nil || len(text) < channelCheckMinLen {
 		return "", false
 	}
+	// The decision-model bracket (tui.EventDecideStart/EventDecideStop,
+	// the EventThinking/EventTurnEnd idiom): the status line reads
+	// "Deciding..." for exactly the duration of this call, and the stop
+	// lands before the confirm or echo the verdict leads to.
+	s.emit(tui.Event{Kind: tui.EventDecideStart, Channel: ch})
 	verdict, err := s.decision.Decide(s.ctx, decide.Question{
 		State:    channelCheckState(text),
 		Question: channelCheckQuestion,
 		Options:  []string{"in-character", "out-of-character"},
 	})
+	s.emit(tui.Event{Kind: tui.EventDecideStop, Channel: ch})
 	if err != nil || verdict.Choice == channelOption(ch) ||
 		verdict.Confidence < channelCheckMinConfidence {
 		return "", false

@@ -34,6 +34,47 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
 - `Metadata() tui.Metadata` — snapshot for the panel (from `resolve.State`).
 - `Close()` — final save, write `transcript.md`, close the channel.
 
+## Status line
+
+The TUI renders `header, body, status line, input, footer` — the status
+line is ALWAYS one row (empty when idle) so the layout never jumps, and
+it sits outside the overlay switch, so sheet, palette, help and panel
+views only replace the body and still show it. The header keeps its
+static segments (session, IC/OOC switch, model, save –/decision –
+placeholders); the throbber moved off it — the status line is the only
+chrome progress element (the dice theatre stays in the transcript: it is
+content, not chrome).
+
+Its content is the throbber's spinner frame plus a pinned label,
+left-aligned and clipped to the window (never wrapped):
+`Thinking...` for `EventThinking` and the streaming-writing state (the
+dot frames vs the cursor block still distinguish them), `Deciding...` for
+`EventDecideStart`. The frame sets are the thinking dots, the writing
+cursor block and the deciding quadrant orbit; the deciding style is the
+theme's Highlight slot (Accent = thinking, Success = writing).
+
+Two brackets drive it, both emitted from the runner goroutine in event
+order:
+
+- **Model turn** — `EventThinking` before each model call, one
+  `EventTurnEnd` when the turn completes or aborts (error path included;
+  `EventError` also clears the line). Thinking → writing on the first
+  narrative delta, back to thinking on a tool annotation.
+- **Decision-model call** — `EventDecideStart` immediately BEFORE each
+  `s.decision.Decide` (the channel gate and the golden-rule check) and
+  `EventDecideStop` immediately AFTER it returns, before any
+  `EventConfirm`, echo or turn event the verdict leads to. The TUI moves
+  from any state (idle included — the channel gate runs before a turn
+  exists) to deciding on the start, to thinking when `EventThinking`
+  arrives (the model wins), and to idle on the stop: a confirm wait that
+  follows therefore shows an EMPTY line — the prompt in the input line is
+  the signal that the player must act. During the off-screen golden
+  rewrite `EventThinking` already fires, so the line reads `Thinking...`.
+  Neither status kind carries transcript content; a pair is emitted only
+  around a call that actually runs — a check that is off, or a missing
+  decision client, never asks (an unreachable one does: the call ran and
+  failed, and the line goes idle again).
+
 ## Turn loop
 
 1. Player `Send(text)` on IC:
@@ -50,8 +91,8 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
       (prompts.Assemble: persona + recap + character/world summaries),
       conversation history, and the registry's `[]llm.ToolSpec`. Each call
       is announced with `EventThinking` first; the turn ends with exactly
-      one `EventTurnEnd` (success or rollback alike) — the TUI brackets a
-      header throbber on them.
+      one `EventTurnEnd` (success or rollback alike) — the TUI brackets
+      the status line on them (see "Status line" below).
 2. While the response contains tool calls:
    a. Dispatch each `ToolCall` to `tools.Registry` against the live
       `*resolve.State`; every result is `Record`ed in the session log.
@@ -91,7 +132,10 @@ correct. The message is held only when all three hold: the verdict differs
 from the channel, its confidence reaches `channelCheckMinConfidence` (0.7),
 and the text is at least `channelCheckMinLen` (32) bytes; a decision model
 that is disabled, unreachable or erroring passes silently, so the check can
-never block a message or fail a turn.
+never block a message or fail a turn. The `Decide` call itself is bracketed
+with `EventDecideStart`/`EventDecideStop` (see "Status line"), so the
+status line reads `Deciding...` for exactly its duration and is empty again
+before the hold or the echo lands.
 
 A held message is not echoed, not appended to history and not recorded: the
 runner emits one `EventConfirm` (Markdown = the exact "N/y" question for the
@@ -121,7 +165,11 @@ an empty reply, an OOC turn, a disabled check, and a decision model that
 is disabled, unreachable or erroring all pass silently, so the check can
 never fail a turn. The reply's message sequence in the state keeps every
 check a fresh question for decide's verdict cache — a rewrite is judged,
-not the first verdict replayed.
+not the first verdict replayed. Every `Decide` call of the loop is
+bracketed with `EventDecideStart`/`EventDecideStop` (see "Status line"),
+so the line reads `Deciding...` while it runs — over a reply that is
+already streaming as `Thinking...` — and goes empty before the regen
+prompt or the turn end that follows.
 
 A held reply files one `EventConfirmRegen` (Markdown = the exact "Y/n"
 question, no held text — whatever stands on screen is what "n" keeps) and
@@ -164,8 +212,9 @@ The conversation and the play text survive the process:
 - **Play lines (`log.jsonl`)** — player echoes (recorded verbatim), GM
   narrative (after `[ic]`/`[ooc]` marker sanitisation) and error text are
   recorded as `Kind: "chat"` entries (`state.ChatLine`: channel, player,
-  kind, text). System confirmations, thinking, turn-end, tool
-  annotations and dice are not chat lines: they are transient, and the
+  kind, text). System confirmations, thinking, turn-end, decision-model
+  start/stop, tool annotations and dice are not chat lines: they are
+  transient, and the
   moves behind them are already in the log. Recording happens inline on
   the runner goroutine, so chat and move entries interleave in true play
   order.

@@ -129,11 +129,17 @@ func (s *Session) goldenCheck(ch tui.Channel, prompt string, res reply) reply {
 	rewritten := false
 	for attempt := 1; ; attempt++ {
 		msgSeq := s.msgSeq // the sequence of the reply under judgement
+		// The decision-model bracket (tui.EventDecideStart/EventDecideStop,
+		// the EventThinking/EventTurnEnd idiom): "Deciding..." for exactly
+		// the duration of this call, the stop landing before the regen
+		// prompt, the rewrite's EventThinking or the turn's EventTurnEnd.
+		s.emit(tui.Event{Kind: tui.EventDecideStart, Channel: ch})
 		verdict, err := s.decision.Decide(s.ctx, decide.Question{
 			State:    goldenCheckState(player, msgSeq),
 			Question: goldenCheckQuestion,
 			Options:  []string{goldenOptionComplies, goldenOptionViolates},
 		})
+		s.emit(tui.Event{Kind: tui.EventDecideStop, Channel: ch})
 		if err != nil {
 			return s.finishGolden(ch, res, rewritten) // silent pass, no verdict to audit
 		}

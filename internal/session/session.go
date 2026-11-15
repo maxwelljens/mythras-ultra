@@ -10,8 +10,10 @@
 // history; [Session.Metadata] reads the state under the read side of a
 // mutex, and events are emitted from that same goroutine, which is what
 // guarantees the ordering the TUI relies on (the player's echo first, one
-// EventThinking before each model call, one tool annotation before its
-// dice, EventTurnEnd last). A resumed session's replayed play history is
+// EventThinking before each model call, one EventDecideStart/
+// EventDecideStop pair around each decision-model call, one tool
+// annotation before its dice, EventTurnEnd last). A resumed session's
+// replayed play history is
 // emitted by that goroutine before it processes any input. [Session.Send]
 // only enqueues, so it never blocks on the model.
 package session

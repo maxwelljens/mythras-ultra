@@ -64,19 +64,28 @@ func newTestSession(t *testing.T, client llm.Client, tweak ...func(*Config)) *Se
 }
 
 // nextEvent waits for the next event, failing the test on timeout or a
-// closed channel.
+// closed channel. The decision-model status events (EventDecideStart /
+// EventDecideStop) the checks emit around their Decide calls are skipped:
+// they are transient status, not transcript or turn progress, so the
+// sequences pinned below stay the ones they were written for. Their exact
+// placement around the HTTP call is pinned raw by TestDecideBracket*,
+// which reads s.Events() itself.
 func nextEvent(t *testing.T, s *Session) tui.Event {
 	t.Helper()
-	select {
-	case ev, ok := <-s.Events():
-		if !ok {
-			t.Fatal("event channel closed while waiting for an event")
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				t.Fatal("event channel closed while waiting for an event")
+			}
+			if ev.Kind == tui.EventDecideStart || ev.Kind == tui.EventDecideStop {
+				continue
+			}
+			return ev
+		case <-time.After(eventTimeout):
+			t.Fatal("timed out waiting for an event")
 		}
-		return ev
-	case <-time.After(eventTimeout):
-		t.Fatal("timed out waiting for an event")
 	}
-	return tui.Event{}
 }
 
 // nextEvents reads exactly n events in arrival order.
