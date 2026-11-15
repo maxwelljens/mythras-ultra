@@ -9,9 +9,11 @@ import (
 
 const (
 	// channelCheckMinConfidence is the lowest decision-model confidence
-	// that makes the channel check hold a message: a verdict disagreeing
-	// with the current IC/OOC mode prompts "N/y" at 0.70 and above, and
-	// sends the message silently below it.
+	// that makes a session check act: a channel verdict disagreeing with
+	// the current IC/OOC mode holds the message for "N/y" at 0.70 and
+	// above, and a golden-rule "violates" verdict prompts the "Y/n"
+	// regeneration at the same floor — below either, the message (or the
+	// reply) passes silently.
 	channelCheckMinConfidence = 0.7
 	// channelCheckMinLen is the shortest player message, in bytes, the
 	// channel check examines: a message of 31 characters or fewer is
@@ -79,7 +81,9 @@ func (s *Session) channelGate(ch tui.Channel, text string) (question string, ok 
 // answers with Command("confirm", "y"|"n") or the session closes. The
 // inputs queue is untouched meanwhile — new messages keep queueing on the
 // buffered channel — and Close discards the hold without hanging: nothing
-// is echoed, recorded or sent to the model until the answer says y.
+// is echoed, recorded or sent to the model until the answer says y. The
+// golden-rule regeneration answers through the same channel from
+// waitRegen; which of the two is blocked is the runner's own state.
 func (s *Session) waitConfirm(ch tui.Channel, question, text string) bool {
 	s.held.Store(true)
 	defer s.held.Store(false)

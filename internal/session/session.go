@@ -111,6 +111,13 @@ type Config struct {
 	// default true). False — the zero value — skips the decide call
 	// entirely; without a Decide client the check passes silently.
 	ChannelCheck bool
+	// GMCheck runs the decision model on every in-character assistant
+	// reply after its tool calls, prompting a "Y/n" regeneration when it
+	// decides the player's character for them (the golden-rule check,
+	// config decision.check_gm_output, default true). False — the zero
+	// value — skips the decide call entirely; without a Decide client
+	// the check passes silently.
+	GMCheck bool
 	// Overrides selects the system prompt template.
 	Overrides prompts.Overrides
 	// SessionsDir holds one directory per session (<SessionsDir>/<id>/);
@@ -166,6 +173,7 @@ func (cfg Config) build(st *resolve.State) *Session {
 		registry:      cfg.Registry,
 		decision:      cfg.Decide,
 		channelCheck:  cfg.ChannelCheck,
+		gmCheck:       cfg.GMCheck,
 		overrides:     cfg.Overrides,
 		sessionsDir:   cfg.SessionsDir,
 		autosave:      cfg.Autosave,
@@ -205,6 +213,14 @@ type Session struct {
 	// channelCheck runs the pre-echo channel gate (Config ChannelCheck);
 	// false skips the decide call entirely.
 	channelCheck bool
+	// gmCheck runs the golden-rule output check on in-character replies
+	// (Config GMCheck); false skips the decide call entirely.
+	gmCheck bool
+	// msgSeq is the sequence number of the assistant message currently
+	// streaming: bumped once per model call, carried by that message's
+	// narrative events and chat lines (0 = untracked). Written only by
+	// the runner goroutine (callModelMode and the golden-rule rewrite).
+	msgSeq int
 	// overrides selects the system prompt template.
 	overrides prompts.Overrides
 	// history is the conversation (system prompt excluded): user,
@@ -264,12 +280,16 @@ type Session struct {
 	quit, done chan struct{}
 	// closed records the first Close so later calls are no-ops.
 	closed atomic.Bool
-	// held reports a pending channel-check hold to [Session.Command],
-	// which answers it on confirmCh instead of the input queue. Written
-	// only by the runner (waitConfirm), read from the command goroutine.
+	// held reports a pending confirmation — the channel-check hold or the
+	// golden-rule regeneration prompt — to [Session.Command], which
+	// answers it on confirmCh instead of the input queue. Which of the
+	// two waits is blocked is the runner's own state (waitConfirm vs
+	// waitRegen); both accept the same "y"/"n" answer. Written only by
+	// the runner, read from the command goroutine.
 	held atomic.Bool
-	// confirmCh carries the y/n answer of the one hold that can exist at
-	// a time; capacity one, because Command refuses a second unanswered
+	// confirmCh carries the y/n answer of the one confirmation that can
+	// exist at a time (channel hold or golden-rule regeneration);
+	// capacity one, because Command refuses a second unanswered
 	// answer rather than blocking.
 	confirmCh chan string
 }

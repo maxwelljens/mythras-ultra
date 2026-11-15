@@ -34,8 +34,9 @@ const (
 // sessionCommands lists the commands [Session.Command] understands, in
 // help-output order; Command reports the same list on an unknown name
 // (the TUI's palette keeps its own catalogue — tui.PaletteCommands).
-// "confirm" is the channel check's y/n answer: it never reaches the
-// palette, because only a pending hold accepts it.
+// "confirm" is a pending confirmation's y/n answer (the channel check's
+// hold or the golden-rule regeneration): it never reaches the palette,
+// because only a pending confirmation accepts it.
 var sessionCommands = []string{"roll", "save", "recap", "meta", "confirm"}
 
 // channelTagRe matches a channel marker a model sometimes writes at the
@@ -68,7 +69,8 @@ func (s *Session) emitNarrative(ch tui.Channel, text string) {
 	if strings.TrimSpace(body) == "" {
 		return
 	}
-	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body}, false)
+	s.emitChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body,
+		MsgSeq: s.msgSeq}, false)
 }
 
 // emitNarrativeBatch sends one display batch of model output to the
@@ -82,7 +84,7 @@ func (s *Session) emitNarrativeBatch(ch tui.Channel, text string, continuation b
 		return
 	}
 	s.emit(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body,
-		Continuation: continuation})
+		Continuation: continuation, MsgSeq: s.msgSeq})
 }
 
 // recordNarrative records one closed entry as a GM chat line — the
@@ -94,7 +96,8 @@ func (s *Session) recordNarrative(ch tui.Channel, text string) {
 	if strings.TrimSpace(body) == "" {
 		return
 	}
-	s.recordChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body}, false)
+	s.recordChat(tui.Event{Kind: tui.EventNarrative, Channel: ch, Markdown: body,
+		MsgSeq: s.msgSeq}, false)
 }
 
 // run is the session's single runner goroutine: it first delivers whatever
@@ -148,8 +151,8 @@ func (s *Session) process(in input) {
 // session, replay the recaps, dump the panel snapshot — each reported with
 // its own system or error event. An unknown command is an error line
 // listing the known ones; no model call ever happens here. A "confirm"
-// answer only ever reaches this switch without a pending hold (a hold
-// takes it directly in Command), so it reports "nothing pending".
+// answer only ever reaches this switch without a pending confirmation
+// (one takes it directly in Command), so it reports "nothing pending".
 func (s *Session) runCommand(ch tui.Channel, name string, args []string) {
 	switch name {
 	case "roll":
@@ -230,11 +233,13 @@ type reply struct {
 
 // runTurn is one model turn (session-loop.md "Turn loop"): append the
 // player's text, assemble the system prompt, call the model, dispatch every
-// tool call it makes (annotation → dice → RoleTool results) and call again,
-// until it answers in prose — at most s.maxRounds dispatch rounds
-// (Config.MaxToolRounds; defaultMaxToolRounds when unset). A model failure
-// rolls the whole turn out of history so the player can retry; a tool
-// failure flows back as an IMPOSSIBLE result and never aborts the turn.
+// tool call it makes (annotation → dice → RoleTool results), run the
+// golden-rule check on the reply (goldenCheck — after dispatch, before the
+// message enters history) and call again, until it answers in prose — at
+// most s.maxRounds dispatch rounds (Config.MaxToolRounds;
+// defaultMaxToolRounds when unset). A model failure rolls the whole turn
+// out of history so the player can retry; a tool failure flows back as an
+// IMPOSSIBLE result and never aborts the turn.
 // The turn is closed by endTurn, so exactly one EventTurnEnd lands after
 // the last event of the turn on every path — success, tool-loop overflow
 // or rollback.
@@ -262,6 +267,45 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 			s.failTurn(ch, rollback, err)
 			return
 		}
+		// Dispatch first, then the golden-rule check, then the message
+		// itself enters history: the events a reply's tools produced are
+		// on screen before any regeneration prompt, and a draft the
+		// player has not accepted never becomes part of the
+		// conversation (session-loop.md "Golden rule check").
+		var results []llm.Message
+		if len(res.calls) > 0 && rounds >= s.maxRounds {
+			// Providers reject a reply whose tool calls have no
+			// results, and this turn will not produce them: keep the
+			// narration, drop the unanswered calls, stop the loop.
+			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
+				"the model kept calling tools for %d rounds in one turn — stopping here; nudge it to answer in prose",
+				s.maxRounds)}, false)
+			if res.text == "" {
+				break // nothing left worth keeping: no history entry
+			}
+			res.calls = nil
+		} else if len(res.calls) > 0 {
+			rounds++
+			results = make([]llm.Message, 0, len(res.calls))
+			for _, call := range res.calls {
+				toolRes := s.runTool(ch, call)
+				payload, merr := json.Marshal(toolRes)
+				body := toolRes.Summary
+				if merr != nil {
+					s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
+						Markdown: fmt.Sprintf("encode result of %q: %v", call.Name, merr)}, false)
+				} else {
+					body = string(payload)
+				}
+				results = append(results, llm.Message{
+					Role:       llm.RoleTool,
+					ToolCallID: call.ID,
+					Name:       call.Name,
+					Content:    body,
+				})
+			}
+		}
+		res = s.goldenCheck(ch, prompt, res)
 		s.history = append(s.history, llm.Message{
 			Role:      llm.RoleAssistant,
 			Content:   res.text,
@@ -270,34 +314,7 @@ func (s *Session) runTurn(ch tui.Channel, text string) {
 		if len(res.calls) == 0 {
 			break // prose answer: the turn is complete
 		}
-		if rounds >= s.maxRounds {
-			// Providers reject a reply whose tool calls have no
-			// results, and this turn will not produce them: keep the
-			// narration, drop the unanswered calls, stop the loop.
-			s.dropDanglingCalls()
-			s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch, Markdown: fmt.Sprintf(
-				"the model kept calling tools for %d rounds in one turn — stopping here; nudge it to answer in prose",
-				s.maxRounds)}, false)
-			break
-		}
-		rounds++
-		for _, call := range res.calls {
-			toolRes := s.runTool(ch, call)
-			payload, merr := json.Marshal(toolRes)
-			body := toolRes.Summary
-			if merr != nil {
-				s.emitChat(tui.Event{Kind: tui.EventError, Channel: ch,
-					Markdown: fmt.Sprintf("encode result of %q: %v", call.Name, merr)}, false)
-			} else {
-				body = string(payload)
-			}
-			s.history = append(s.history, llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: call.ID,
-				Name:       call.Name,
-				Content:    body,
-			})
-		}
+		s.history = append(s.history, results...)
 	}
 	s.compact()
 }
@@ -315,21 +332,6 @@ func (s *Session) endTurn(ch tui.Channel) {
 		}
 	}
 	s.emit(tui.Event{Kind: tui.EventTurnEnd, Channel: ch})
-}
-
-// dropDanglingCalls removes unanswered tool calls from the last assistant
-// message: an assistant reply that asks for tools with no RoleTool answers
-// following it would be rejected by the provider on the next call.
-func (s *Session) dropDanglingCalls() {
-	last := len(s.history) - 1
-	if last < 0 {
-		return
-	}
-	if s.history[last].Content == "" {
-		s.history = s.history[:last] // nothing left worth keeping
-		return
-	}
-	s.history[last].ToolCalls = nil
 }
 
 // requestMessages builds one ChatRequest: the freshly assembled system
@@ -391,19 +393,33 @@ func (e *streamEntry) closeAt(end int) (tail string, continuation bool, record s
 }
 
 // callModel asks the model for the next message, streaming narration into
-// the transcript as it arrives. Display and recording are separate paths:
-// every batch — the tail at a paragraph boundary, an eager flush once an
-// unbroken run reaches partialNarrativeMin bytes, and the remainder when
-// the reply ends — is emitted for display (Continuation when it extends
-// the entry on screen), while the paragraph itself is recorded as ONE chat
-// line when its entry closes. A stream that fails before producing
+// the transcript as it arrives (session-loop.md "Turn loop").
+func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) {
+	return s.callModelMode(ch, req, false)
+}
+
+// callModelMode is callModel with an offscreen switch: the golden-rule
+// rewrite re-asks the model without showing or recording anything — the
+// call runs with the same EventThinking bracket (the header throbber keeps
+// its thinking/writing states), but no batch reaches the transcript, no
+// chat line is written, and the reply's text comes back whole for the
+// caller to swap in. For the on-screen mode, display and recording are
+// separate paths: every batch — the tail at a paragraph boundary, an eager
+// flush once an unbroken run reaches partialNarrativeMin bytes, and the
+// remainder when the reply ends — is emitted for display (Continuation
+// when it extends the entry on screen), while the paragraph itself is
+// recorded as ONE chat line when its entry closes. Every assistant message
+// that streams takes the next MsgSeq (s.msgSeq), which its narrative
+// events and chat lines carry. A stream that fails before producing
 // anything falls back to a single Chat call — a client may be chat-only —
 // while a stream that fails midway is a model failure the caller rolls
-// back (session-loop.md failure policy).
-func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) {
+// back (session-loop.md failure policy); offscreen, a failed rewrite is
+// the caller's to report, so partial text never reaches the screen.
+func (s *Session) callModelMode(ch tui.Channel, req llm.ChatRequest, offscreen bool) (reply, error) {
 	if s.client == nil {
 		return reply{}, ErrNoClient
 	}
+	s.msgSeq++ // this call's assistant message, identified end to end
 	// A model call is in flight — the header throbber shows "thinking"
 	// until the first narrative delta or the turn end. Emitted here rather
 	// than in runTurn so it covers every call, re-invocations included,
@@ -419,6 +435,9 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 		switch ev.Kind {
 		case llm.StreamTextDelta:
 			ent.text += ev.Text
+			if offscreen {
+				break // accumulate only: no display, no recording
+			}
 			// Every "\n\n" in the open entry closes it: flush the
 			// tail, record the paragraph once, open the next one.
 			for {
@@ -447,33 +466,42 @@ func (s *Session) callModel(ch tui.Channel, req llm.ChatRequest) (reply, error) 
 	})
 	switch {
 	case err == nil:
-		s.closeEntry(ch, &ent, len(ent.text)) // flush the remainder, record once
+		if !offscreen {
+			s.closeEntry(ch, &ent, len(ent.text)) // flush the remainder, record once
+		}
 		r.text = ent.text
 		return r, nil
 	case !got:
 		// The stream never started — fall back to one Chat round trip.
-		s.closeEntry(ch, &ent, len(ent.text)) // no delta ever arrived: nothing to close
+		if !offscreen {
+			s.closeEntry(ch, &ent, len(ent.text)) // no delta ever arrived: nothing to close
+		}
 		resp, cerr := s.client.Chat(s.ctx, req)
 		if cerr != nil {
 			return reply{}, fmt.Errorf("chat: %w", cerr)
 		}
 		s.noteUsage(resp.Usage.InputTokens)
-		s.emitNarrative(ch, resp.Message.Content)
+		if !offscreen {
+			s.emitNarrative(ch, resp.Message.Content)
+		}
 		return reply{text: resp.Message.Content, calls: resp.Message.ToolCalls}, nil
 	default:
 		// A failed stream still closes its entry: the text the player
 		// already saw is displayed and recorded once, then the caller
-		// rolls the turn back.
-		s.closeEntry(ch, &ent, len(ent.text))
+		// rolls the turn back. Offscreen, nothing was shown — nothing
+		// to close, nothing to record.
+		if !offscreen {
+			s.closeEntry(ch, &ent, len(ent.text))
+		}
 		return reply{}, fmt.Errorf("stream: %w", err)
 	}
 }
 
 // closeEntry closes the entry at end: the undisplayed tail is emitted as
 // one batch (continuing the entry on screen when one is already open) and
-// the whole entry is recorded as exactly one chat line. Every path through
-// callModel ends here, so a paragraph can never be recorded twice — or
-// displayed and never recorded.
+// the whole entry is recorded as exactly one chat line. Every on-screen
+// path through callModelMode ends here, so a paragraph can never be
+// recorded twice — or displayed and never recorded.
 func (s *Session) closeEntry(ch tui.Channel, ent *streamEntry, end int) {
 	batch, cont, record := ent.closeAt(end)
 	s.emitNarrativeBatch(ch, batch, cont)

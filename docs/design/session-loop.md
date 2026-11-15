@@ -15,7 +15,8 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
   parsed for commands: prose that looks like `/save` reaches the model as
   prose.
 - `Command(name, args...)` — one named local command (`roll`, `save`,
-  `recap`, `meta`, plus the channel check's `confirm` answer), enqueued on
+  `recap`, `meta`, plus a pending confirmation's `confirm` answer — the
+  channel check's hold or the golden rule's regeneration), enqueued on
   the same single-runner goroutine as messages. Commands carry no player
   text: they produce no echo, never reach the model, and run on the
   session's current channel; an unknown
@@ -72,7 +73,8 @@ the event stream to the UI. It implements the TUI's `tui.Driver` interface
    echo). Display and recording are separate: the paragraph is recorded as
    ONE chat line when its entry closes — at the boundary or at the end of
    the reply, error path included — so replay keeps producing
-   whole-paragraph entries. On completion append to history.
+   whole-paragraph entries. On completion the golden-rule check below
+   gates the reply, then it enters history.
 4. OOC channel: same loop but tag the message `[ooc]`; the prompt instructs
    the GM to reply out of character and perform no moves unless the player
    confirms.
@@ -102,6 +104,52 @@ behind it comes back as a "nothing pending" error line. The TUI answers from
 the input line: while the confirm stands the prompt reads `N/y ▸ `, y/Y
 sends "y", n/N/enter/esc sends "n" and returns the held text to the input
 line unsent, every other key is ignored (ctrl+c still quits).
+
+## Golden rule check (regen)
+
+Every **in-character** assistant reply is checked after its tool calls have
+dispatched (dice and annotation events already on screen) and before it
+enters history, with `[decision] check_gm_output` on (default). The runner
+asks the decision model
+`decide.Question{State: <the player's latest message + the reply's message
+sequence>, Question: "Does this Game Master reply decide what the player's
+character does — choosing or narrating the character's actions the player
+never chose? It complies if the player keeps all choices.", Options:
+["complies","violates"]}`. The reply is held only when the verdict is
+"violates" and its confidence reaches `channelCheckMinConfidence` (0.7);
+an empty reply, an OOC turn, a disabled check, and a decision model that
+is disabled, unreachable or erroring all pass silently, so the check can
+never fail a turn. The reply's message sequence in the state keeps every
+check a fresh question for decide's verdict cache — a rewrite is judged,
+not the first verdict replayed.
+
+A held reply files one `EventConfirmRegen` (Markdown = the exact "Y/n"
+question, no held text — whatever stands on screen is what "n" keeps) and
+waits for `Command("confirm", "y"|"n")` like the channel check's hold,
+with the inverse default: **Enter regenerates here, Enter discards
+there** (the input line shows "Y/n ▸ " over the hold's "N/y ▸ ", both
+modes keyed from the same confirm command). **y** re-asks the model
+OFF-SCREEN — `history + [assistant{original text, original toolCalls},
+user{corrective nudge}]`, no tools advertised, narrative suppressed so
+only the `EventThinking` bracket shows — then swaps the rewrite into the
+transcript as ONE `EventNarrative` with `Replace` set: it carries the new
+`MsgSeq`, the TUI removes every narrative entry of the replaced sequence
+and files the full text at the first one's position. The replaced
+message's recorded chat lines are tombstoned with an append-only `retract`
+line, the rewrite is recorded as one chat line with its new MsgSeq, and
+the rewrite is re-checked through the same gate — still violating means
+the same prompt again (bounded only by the player), clean ends the loop.
+The rewrite's own tool calls are stripped (the originals already ran), and
+discarded drafts never enter history: the final message lands as
+`assistant{final text, ORIGINAL toolCalls}` plus its tool results as
+usual. **n** keeps the message as-is with no mark. A rewrite that ends up
+standing leaves one muted `note` chat line (`↩ reply rewritten (golden
+rule)`), replayed as a system event; transcript and replay are two-phase —
+the retract tombstones hide exactly the lines of their MsgSeq, everything
+else (legacy MsgSeq-0 lines included) renders as recorded. Each completed
+check is audited as a `golden_rule_check` LogEntry
+`{msg_seq, verdict, confidence, decision, attempt}` which the transcript
+renderer skips: the display shows only the note.
 
 ## Chat persistence & replay
 

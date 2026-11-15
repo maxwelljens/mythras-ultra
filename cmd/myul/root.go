@@ -482,6 +482,10 @@ base_url = ""
 enabled = true
 # Channel check: hold a message of 32+ characters for N/y when the decision model (at least 0.7 confidence) calls it the other channel; false skips it.
 channel_check = true
+# Golden rule check: after each in-character reply and its tool calls, ask
+# the decision model whether it decided the player's actions for them; at
+# 0.7+ confidence a "Y/n" prompt offers a regeneration loop. false skips it.
+check_gm_output = true
 url = "http://localhost:11434"
 model = "tev1:4b"
 

@@ -119,6 +119,7 @@ func runSession(cmd *cobra.Command, cfg *config.Config, opts sessionOptions) err
 		Registry:      tools.NewRegistry(decision),
 		Decide:        decision,
 		ChannelCheck:  cfg.Decision.ChannelCheck,
+		GMCheck:       cfg.Decision.GMCheck,
 		Overrides:     prompts.Overrides{SystemPromptPath: cfg.Prompts["system"]},
 		SessionsDir:   config.SessionsDir(),
 		Autosave:      cfg.Game.Autosave,

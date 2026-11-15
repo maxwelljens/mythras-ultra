@@ -18,6 +18,10 @@ const chatLogKind = "chat"
 
 // Recorded chat kinds — the neutral strings log.jsonl carries; the session
 // maps them to and from tui.EventKind (state stays neutral about the TUI).
+// The golden-rule rewrite adds two of its own — retract (a tombstone
+// hiding one MsgSeq's lines) and note (the muted remark left behind by an
+// accepted rewrite) — whose shapes state itself understands, so the
+// session uses state.ChatKindRetract / state.ChatKindNote directly.
 const (
 	chatKindNarrative = "narrative"
 	chatKindError     = "error"
@@ -96,13 +100,19 @@ type replayResult struct {
 // the pure half of loadReplay, shared with the tests so the queue they
 // drain is the queue the runner delivers:
 //
-//   - every chat line, as the event it was recorded from;
+//   - every chat line, as the event it was recorded from — collected
+//     in two phases: the "retract" tombstones name the MsgSeqs whose
+//     lines a golden-rule rewrite superseded, and those lines (and the
+//     tombstones themselves) are skipped, so the replay shows only the
+//     final version of a rewritten message while every other line plays
+//     back as recorded;
 //   - every result's audit rolls, always — resume shows the rolls that
 //     happened as finished banners (Replay stops the TUI performing them
 //     again), with the tool annotation in front of its dice when
 //     replayTools is set (config ui.replay_tools);
 //   - nothing else: annotations and dice are transient, so only what a
-//     Result carries can be replayed.
+//     Result carries can be replayed. Golden-rule audit entries carry no
+//     Result, so they never replay either — the note does.
 //
 // Entries keep log order, and annotation + dice stay together per entry.
 // Moves carry no channel, so dice and annotations follow the channel of
@@ -110,18 +120,24 @@ type replayResult struct {
 // that entry's replay only and says so as a system event.
 func replayEvents(entries []state.LogEntry, replayTools bool) []tui.Event {
 	var (
-		out []tui.Event
-		ch  tui.Channel // moves record no channel: follow the play around them
+		out       []tui.Event
+		ch        tui.Channel // moves record no channel: follow the play around them
+		retracted = retractedMsgSeqs(entries)
 	)
 	for _, e := range entries {
 		if e.Chat != nil {
-			ch = replayChannel(e.Chat.Channel)
+			c := e.Chat
+			if c.Kind == state.ChatKindRetract || (c.MsgSeq != 0 && retracted[c.MsgSeq]) {
+				continue // hidden by (or being) a rewrite tombstone
+			}
+			ch = replayChannel(c.Channel)
 			out = append(out, tui.Event{
-				Kind:     replayKind(e.Chat.Kind),
+				Kind:     replayKind(c.Kind),
 				Channel:  ch,
-				Markdown: e.Chat.Text,
+				Markdown: c.Text,
 				At:       e.At,
-				Player:   e.Chat.Player,
+				Player:   c.Player,
+				MsgSeq:   c.MsgSeq,
 				Replay:   true,
 			})
 			continue
@@ -185,6 +201,7 @@ func (s *Session) recordChat(ev tui.Event, player bool) {
 		Channel: ev.Channel.String(),
 		Player:  player,
 		Kind:    kind,
+		MsgSeq:  ev.MsgSeq,
 		Text:    ev.Markdown,
 	}}
 	if err := s.store.Record(s.state.ID, entry); err != nil {
@@ -193,13 +210,76 @@ func (s *Session) recordChat(ev tui.Event, player bool) {
 	}
 }
 
+// recordRetract appends the golden-rule rewrite's tombstone: an empty chat
+// line naming the MsgSeq whose recorded lines a rewritten reply supersedes.
+// The log stays append-only — the transcript and the replay collect these
+// first and hide exactly the lines they name. A record failure surfaces as
+// an error line that is deliberately not recorded itself (see recordChat).
+func (s *Session) recordRetract(ch tui.Channel, msgSeq int) {
+	entry := state.LogEntry{Kind: chatLogKind, Chat: &state.ChatLine{
+		Channel: ch.String(),
+		Kind:    state.ChatKindRetract,
+		MsgSeq:  msgSeq,
+		Text:    "",
+	}}
+	if err := s.store.Record(s.state.ID, entry); err != nil {
+		s.emit(tui.Event{Kind: tui.EventError, Channel: ch,
+			Markdown: fmt.Sprintf("record rewrite tombstone: %v", err)})
+	}
+}
+
+// emitGoldenNote shows the golden-rule check's one visible mark: the muted
+// system line left behind when a rewritten reply is finally standing. It
+// is recorded as its own note chat line (with the rewritten message's
+// MsgSeq), so replay shows it as a system event. A record failure surfaces
+// as an error line (see recordChat).
+func (s *Session) emitGoldenNote(ch tui.Channel, msgSeq int) {
+	s.emit(tui.Event{Kind: tui.EventSystem, Channel: ch,
+		Markdown: goldenRuleNote, MsgSeq: msgSeq})
+	entry := state.LogEntry{Kind: chatLogKind, Chat: &state.ChatLine{
+		Channel: ch.String(),
+		Kind:    state.ChatKindNote,
+		MsgSeq:  msgSeq,
+		Text:    goldenRuleNote,
+	}}
+	if err := s.store.Record(s.state.ID, entry); err != nil {
+		s.emit(tui.Event{Kind: tui.EventError, Channel: ch,
+			Markdown: fmt.Sprintf("record rewrite note: %v", err)})
+	}
+}
+
 // replayKind maps a recorded chat kind back to its event kind; an empty
 // kind (defensive — every recorded line carries one) reads as narrative.
+// A golden-rule note comes back as a system event; a retract tombstone
+// never reaches replayEvents' output at all (it hides lines instead).
 func replayKind(kind string) tui.EventKind {
-	if kind == chatKindError {
+	switch kind {
+	case chatKindError:
 		return tui.EventError
+	case state.ChatKindNote:
+		return tui.EventSystem
+	default:
+		return tui.EventNarrative
 	}
-	return tui.EventNarrative
+}
+
+// retractedMsgSeqs collects, in one pass over the log, the MsgSeqs the
+// "retract" tombstones hide — the two-phase groundwork replay and
+// transcript share: collect first, then render chronologically, so later
+// lines with a different MsgSeq always show. A tombstone with MsgSeq 0
+// (legacy — never written) retracts nothing.
+func retractedMsgSeqs(entries []state.LogEntry) map[int]bool {
+	var out map[int]bool
+	for _, e := range entries {
+		if e.Chat == nil || e.Chat.Kind != state.ChatKindRetract || e.Chat.MsgSeq == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[int]bool)
+		}
+		out[e.Chat.MsgSeq] = true
+	}
+	return out
 }
 
 // replayChannel maps a recorded channel label back to its channel;
