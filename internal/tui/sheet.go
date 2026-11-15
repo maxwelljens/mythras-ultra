@@ -502,10 +502,10 @@ func (a *App) openSheet() {
 func (a *App) closeSheet() { a.sheetOpen = false }
 
 // sheetBodyHeight is how many body lines one overlay screen shows: the
-// window minus the app header, the sheet header, the input line and the
-// footer.
+// window minus the app header, the status line, the sheet header, the
+// input line and the footer.
 func (a *App) sheetBodyHeight() int {
-	h := a.height - 4
+	h := a.height - 5
 	if h < 1 {
 		h = 1
 	}

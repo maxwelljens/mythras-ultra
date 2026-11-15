@@ -39,9 +39,12 @@ func renderHelp(th Theme, width, height int) string {
 		innerW = 72 // long help lines read better in a narrow column
 	}
 
+	// No spacer under the title: with the status line the body is one
+	// row shorter, and at the fit budget (80×20) the command list's
+	// "Theme: …" line must stay on screen — the border padding already
+	// separates the title from the KEYS header.
 	lines := []string{
 		th.Styles.Highlight.Render("MYTHRAS ULTRA · HELP"),
-		"",
 		th.Styles.Header.Render("KEYS"),
 	}
 	for _, k := range helpKeys {

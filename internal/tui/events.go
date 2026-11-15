@@ -28,8 +28,9 @@ func (c Channel) String() string {
 }
 
 // EventKind classifies what an event carries: it selects how the app
-// renders a transcript entry, and the two status kinds (EventThinking,
-// EventTurnEnd) drive the header throbber instead of the transcript.
+// renders a transcript entry, and the status kinds (EventThinking,
+// EventTurnEnd, EventDecideStart, EventDecideStop) drive the status-line
+// throbber instead of the transcript.
 type EventKind int
 
 const (
@@ -45,11 +46,11 @@ const (
 	EventError
 	// EventThinking reports that a model call is in flight — the harness
 	// emits it before every llm.Chat/Stream, including re-invocations
-	// after tool rounds. It carries no transcript content: the header
-	// throbber shows the thinking state.
+	// after tool rounds. It carries no transcript content: the status
+	// line shows the thinking state.
 	EventThinking
 	// EventTurnEnd reports that a turn finished, successfully or not. It
-	// carries no transcript content: the header throbber returns to idle.
+	// carries no transcript content: the status line returns to idle.
 	EventTurnEnd
 	// EventConfirm asks the player to answer a pending confirmation —
 	// the channel check's "N/y" question about a held message. Markdown
@@ -66,6 +67,28 @@ const (
 	// prompt: enter/y/Y answer y, n/N/esc answer n, every other key is
 	// ignored; the runner waits for Command("confirm", "y"|"n").
 	EventConfirmRegen
+	// EventDecideStart reports that a decision-model call (the channel
+	// check's or the golden-rule check's Decide) is about to run: the
+	// status line shows the "Deciding..." spinner until the matching
+	// [EventDecideStop]. It is the decision-model bracket, emitted in
+	// the EventThinking/EventTurnEnd idiom: exactly one start immediately
+	// BEFORE each decision-model call and one stop immediately AFTER it
+	// returns — the TUI cannot see the call itself, so the session
+	// brackets it. Neither event carries transcript content, and they are
+	// only ever emitted in pairs around a call that actually runs (a
+	// check that is off, or a missing decision client, never asks).
+	EventDecideStart
+	// EventDecideStop closes the bracket [EventDecideStart] opened before
+	// a decision-model call: it arrives as soon as the call returns —
+	// error path included — and always BEFORE any event its outcome leads
+	// to: the channel check's [EventConfirm] (mismatch) or verbatim echo
+	// (clean), the golden-rule check's [EventConfirmRegen] or the turn's
+	// [EventTurnEnd]. The TUI returns the status line to idle on it, so a
+	// confirm wait that follows shows an EMPTY line — the prompt in the
+	// input line is the signal that the player must act; a model call
+	// that follows (the off-screen golden rewrite, the next round) shows
+	// EventThinking's "Thinking..." instead.
+	EventDecideStop
 )
 
 // Annotation describes one engine tool call for the annotation strip.
@@ -293,11 +316,17 @@ type Event struct {
 //     remember the last-used mode across sessions. It is a UI hint, never
 //     game state: the app calls it best-effort and absorbs its error
 //     instead of surfacing it, and after Close it must be a no-op.
-//   - A model turn is bracketed for the header throbber: the harness emits
+//   - A model turn is bracketed for the status line: the harness emits
 //     EventThinking before each model call and exactly one EventTurnEnd
 //     when the turn completes or aborts (error path included). Neither
 //     carries transcript content, and both arrive in order with every
 //     other event of that turn.
+//   - A decision-model call is bracketed the same way: the harness emits
+//     EventDecideStart immediately before each Decide call and exactly
+//     one EventDecideStop immediately after it returns, before any
+//     EventConfirm, echo or turn event of that call's outcome. Neither
+//     carries transcript content; during a confirm wait the status line
+//     is empty because the stop has already landed.
 //   - Events returns the event stream; every call must return the same
 //     channel, which the app reads once at construction. The app re-arms a
 //     read after each event, so events must be delivered one at a time.

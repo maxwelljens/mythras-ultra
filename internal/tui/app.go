@@ -78,7 +78,7 @@ type App struct {
 	diceEv  Event       // the event the theatre is staging
 	diceIdx int         // transcript position the roll will be filed at
 
-	throb throbber // the header thinking/writing indicator (idle outside a turn)
+	throb throbber // the status-line progress indicator (idle when nothing runs)
 
 	panelOpen bool
 	helpOpen  bool
@@ -230,8 +230,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.metadataTick()
 
 	case spinner.TickMsg:
-		// The throbber re-arms itself only while a turn runs; a late tick
-		// after EventTurnEnd returns no command, so no timer survives.
+		// The throbber re-arms itself only while something runs; a late
+		// tick after EventTurnEnd (or a decide stop) returns no command,
+		// so no timer survives.
 		return a, a.throb.update(msg)
 
 	case diceTickMsg, diceSettleMsg, diceFinishMsg:
@@ -269,12 +270,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// View renders the whole screen: header, transcript (plus the metadata panel
-// when open, or the help overlay when it is up), input line and footer, in
-// the active theme.
+// View renders the whole screen: header, transcript (plus the metadata
+// panel when open, or the help overlay when it is up), the status line,
+// input line and footer, in the active theme.
 func (a *App) View() tea.View {
 	var body string
-	bodyH := a.height - 3 // header, input line, footer
+	bodyH := a.height - 4 // header, status line, input line, footer
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -297,6 +298,7 @@ func (a *App) View() tea.View {
 	content := strings.Join([]string{
 		a.renderHeader(),
 		body,
+		a.renderStatus(),
 		a.input.View(),
 		a.renderFooter(),
 	}, "\n")
@@ -859,9 +861,10 @@ func (a *App) retag() {
 	}
 }
 
-// ingest files one harness event. The two status kinds never reach the
-// transcript: EventThinking and EventTurnEnd drive the header throbber
-// only (EventError clears it as well as being filed). Dice events go to
+// ingest files one harness event. The status kinds never reach the
+// transcript: EventThinking, EventTurnEnd, EventDecideStart and
+// EventDecideStop drive the status-line throbber only (EventError clears
+// it as well as being filed). Dice events go to
 // the theatre instead of the transcript: the roll animates in place while
 // the transcript keeps accepting events after it, and the banner is filed
 // when the animation finishes (at once when animation is off) — a roll
@@ -873,7 +876,20 @@ func (a *App) retag() {
 func (a *App) ingest(ev Event) tea.Cmd {
 	switch ev.Kind {
 	case EventThinking:
+		// The model wins over a pending decide bracket: deciding →
+		// thinking on the call that follows it.
 		return a.throb.setState(throbThinking)
+	case EventDecideStart:
+		// The decision model runs — from idle (the pre-echo channel
+		// gate) or from any busy state (the golden-rule check): the
+		// line reads "Deciding..." until its stop.
+		return a.throb.setState(throbDeciding)
+	case EventDecideStop:
+		// The call returned: idle again. The stop always precedes the
+		// events its outcome leads to — a confirm wait shows an empty
+		// line (the prompt is the signal), a turn event re-establishes
+		// idle or moves the line on.
+		return a.throb.setState(throbIdle)
 	case EventTurnEnd:
 		return a.throb.setState(throbIdle)
 	case EventConfirm, EventConfirmRegen:
@@ -1116,7 +1132,7 @@ func (a *App) relayout() {
 	if a.width < 1 || a.height < 1 {
 		return
 	}
-	bodyH := a.height - 3 // header, input line, footer
+	bodyH := a.height - 4 // header, status line, input line, footer
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -1421,8 +1437,10 @@ func (a *App) diceBanner(d *DiceEvent, w int) string {
 	return lipgloss.PlaceHorizontal(w, lipgloss.Center, rendered)
 }
 
-// renderHeader builds the status line: session, segmented IC/OOC switch,
+// renderHeader builds the status header: session, segmented IC/OOC switch,
 // model, and static save/decision placeholders (filled in by later waves).
+// Progress lives on its own line above the input (renderStatus), never
+// here — the header is stable while a turn runs.
 func (a *App) renderHeader() string {
 	var parts []string
 	if a.opts.SessionName != "" {
@@ -1436,13 +1454,17 @@ func (a *App) renderHeader() string {
 		a.theme.Styles.Muted.Render("save –"),
 		a.theme.Styles.Muted.Render("decision –"),
 	)
-	// Trailing so earlier segments never shift; fit clips it first when the
-	// header runs short. Empty while idle, so no indicator outside a turn.
-	if throb := a.throb.view(); throb != "" {
-		parts = append(parts, throb)
-	}
 	sep := a.theme.Styles.Muted.Render("·")
 	return fit(a.theme.Styles.Header, strings.Join(parts, " "+sep+" "), a.width)
+}
+
+// renderStatus builds the status line above the input: the throbber's
+// spinner frame and label while a model or decision call runs, an empty
+// row when idle. The row is always rendered (one line, left-aligned,
+// clipped to the window) so the layout never jumps between turns, and it
+// sits outside the View switch, so every view mode shows it.
+func (a *App) renderStatus() string {
+	return a.throb.status(a.width)
 }
 
 // channelSwitch renders the segmented IC/OOC indicator with the active

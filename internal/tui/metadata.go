@@ -230,7 +230,7 @@ func renderMetadata(th Theme, m Metadata, width, height int) string {
 	if innerW < 1 {
 		innerW = 1
 	}
-	bodyH := height - 3 // header, input line, footer
+	bodyH := height - 4 // header, status line, input line, footer
 	if bodyH < 1 {
 		bodyH = 1
 	}

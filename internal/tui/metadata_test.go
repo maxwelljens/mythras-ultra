@@ -72,8 +72,8 @@ func TestRenderMetadataPopulated(t *testing.T) {
 		}
 	}
 	// The box is exactly the transcript height: no layout break.
-	if lines := strings.Split(raw, "\n"); len(lines) != 37 {
-		t.Errorf("panel has %d lines, want 37 (height 40 minus header/input/footer)", len(lines))
+	if lines := strings.Split(raw, "\n"); len(lines) != 36 {
+		t.Errorf("panel has %d lines, want 36 (height 40 minus header/status/input/footer)", len(lines))
 	}
 }
 
