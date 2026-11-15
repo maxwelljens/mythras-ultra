@@ -17,7 +17,8 @@ import (
 var scalarEnvKeys = []string{
 	"MYUL_LLM_PROVIDER", "MYUL_LLM_MODEL", "MYUL_LLM_API_KEY_ENV", "MYUL_LLM_BASE_URL",
 	"MYUL_LLM_CONTEXT_WINDOW", "MYUL_LLM_HEADERS",
-	"MYUL_DECISION_ENABLED", "MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
+	"MYUL_DECISION_ENABLED", "MYUL_DECISION_CHANNEL_CHECK", "MYUL_DECISION_CHECK_GM_OUTPUT",
+	"MYUL_DECISION_URL", "MYUL_DECISION_MODEL",
 	"MYUL_GAME_SEED", "MYUL_GAME_AUTOSAVE", "MYUL_GAME_MAX_TOOL_ROUNDS",
 	"MYUL_UI_THEME", "MYUL_UI_DICE_ANIMATION", "MYUL_UI_METADATA_DEFAULT",
 	"MYUL_UI_REPLAY_TOOLS", "MYUL_UI_COLOUR_MODE",
@@ -42,6 +43,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !cfg.Decision.ChannelCheck {
 		t.Error("decision.channel_check default = false, want true")
+	}
+	if !cfg.Decision.GMCheck {
+		t.Error("decision.check_gm_output default = false, want true")
 	}
 	if want := "http://localhost:11434"; cfg.Decision.URL != want {
 		t.Errorf("decision.url default = %q, want %q", cfg.Decision.URL, want)
@@ -108,6 +112,7 @@ context_window = 128000
 [decision]
 enabled = false
 channel_check = false
+check_gm_output = false
 
 [game]
 seed = 42
@@ -136,6 +141,7 @@ persona = "/tmp/persona.md"
 				}
 				want.Decision.Enabled = false
 				want.Decision.ChannelCheck = false
+				want.Decision.GMCheck = false
 				want.Game.Seed = 42
 				want.Game.MaxToolRounds = 7
 				want.Game.HouseRules = map[string]bool{"crit_fumble": true}

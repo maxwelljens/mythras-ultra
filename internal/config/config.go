@@ -77,6 +77,13 @@ type DecisionConfig struct {
 	// N/y confirmation. When false the runner skips the decide call
 	// entirely. It is a plain bool: any value validates.
 	ChannelCheck bool `mapstructure:"channel_check"`
+	// GMCheck asks the decision model, after each in-character reply and
+	// its tool calls, whether the reply decides the player's character's
+	// actions for them; a "violates" verdict at 0.7+ confidence prompts
+	// the "Y/n" regeneration loop (the golden-rule check). When false
+	// the runner skips the decide call entirely. It is a plain bool: any
+	// value validates.
+	GMCheck bool `mapstructure:"check_gm_output"`
 	// URL is the decision-model base URL.
 	URL string `mapstructure:"url"`
 	// Model is the decision model's name.
@@ -126,6 +133,7 @@ func DefaultConfig() *Config {
 		Decision: DecisionConfig{
 			Enabled:      true,
 			ChannelCheck: true,
+			GMCheck:      true,
 			URL:          "http://localhost:11434",
 			Model:        "tev1:4b",
 		},
@@ -213,6 +221,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.context_window", 0)
 	v.SetDefault("decision.enabled", true)
 	v.SetDefault("decision.channel_check", true)
+	v.SetDefault("decision.check_gm_output", true)
 	v.SetDefault("decision.url", "http://localhost:11434")
 	v.SetDefault("decision.model", "tev1:4b")
 	v.SetDefault("game.seed", 0)
