@@ -6,6 +6,11 @@ hallucinated: dice, combat, inventory, and world state change only through a
 deterministic Go engine the GM must call via tools. Play happens in a rich
 Bubbletea TUI — chat, animated dice, character HUD, and session persistence.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" width="720"
+       alt="The myul TUI in play: you search a shrine, the GM calls skill_test, an animated d100 lands a critical, and the metadata panel gains a silver torc.">
+</p>
+
 ## Features
 
 - LLM game master — provider adapters over charmbracelet `fantasy`

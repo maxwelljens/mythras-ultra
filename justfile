@@ -16,6 +16,10 @@ lint:
 run: build
 	./bin/myul
 
+# Regenerate the README promotional GIF (needs deno, rsvg-convert, ffmpeg).
+demo:
+	deno run -A docs/assets/demo/demo.ts
+
 # Remove build artifacts.
 clean:
 	rm -rf bin

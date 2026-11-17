@@ -9,6 +9,9 @@
 *.test
 coverage.*
 
+# Demo clip scratch frames (docs/assets/demo/demo.ts --keep-frames)
+docs/assets/demo/frames/
+
 # Editor/IDE
 .idea/
 .vscode/
