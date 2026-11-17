@@ -17,10 +17,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mythras-ultra/myul/internal/config"
-	"github.com/mythras-ultra/myul/internal/harness/decide"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/state"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/state"
 )
 
 // configPath is the value of the persistent --config flag; the empty

@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // FatigueCondition names the condition that carries a character's

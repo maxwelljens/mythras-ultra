@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // ErrInvalidArgs reports a tool call whose arguments could not be used: malformed

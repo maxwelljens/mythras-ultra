@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/codex"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/harness/decide"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/codex"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
 )
 
 // Registry holds the tool catalogue in registration order and dispatches the

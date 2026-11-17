@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
 )
 
 // TestActionTable covers the Combat Actions and Costs table: every row

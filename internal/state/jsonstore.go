@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // JSONStore is the on-disk Store: sessions live under

@@ -18,10 +18,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/harness/decide"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/harness/tools"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/tools"
 )
 
 // mockScript is one testdata/mocksession fixture: the session seed, the

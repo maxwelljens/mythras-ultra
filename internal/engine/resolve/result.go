@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // Audit is the mechanical trail a Move leaves behind: every dice roll it

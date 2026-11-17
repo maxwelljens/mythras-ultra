@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
 )
 
 // TestInventoryAdd covers sample-table items (statistics carried), plain

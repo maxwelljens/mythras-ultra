@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/dice"
-	"github.com/mythras-ultra/myul/internal/engine/rules"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/rules"
 )
 
 // TestRollDice covers the dice tool: audit trail, citation, reason, and the

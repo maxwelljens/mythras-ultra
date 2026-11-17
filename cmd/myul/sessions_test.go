@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/config"
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/state"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/state"
 )
 
 // sessionEnv points the config and data directories at fresh temp dirs and

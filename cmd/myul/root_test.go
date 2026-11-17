@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
 )
 
 // execute runs the root command with args and returns everything it

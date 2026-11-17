@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/world"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/world"
 )
 
 // SetWorldFlag writes one world fact (tool: world_set_flag). Namespaced

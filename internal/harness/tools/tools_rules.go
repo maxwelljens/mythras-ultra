@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/codex"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/codex"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
 )
 
 // unavailableText is the decide-tool refusal the GM narrates when the

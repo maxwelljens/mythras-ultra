@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 // rawEvent waits for the next event exactly as it arrives, the

@@ -10,8 +10,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/mythras-ultra/myul/internal/config"
-	"github.com/mythras-ultra/myul/internal/state"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/state"
 )
 
 // newResumeCmd builds `myul resume [session-id]`: load a saved session and

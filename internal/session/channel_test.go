@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/harness/tools"
-	"github.com/mythras-ultra/myul/internal/state"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/tools"
+	"github.com/maxwelljens/mythras-ultra/internal/state"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 // channelConfig builds a config over root for the channel tests; the same

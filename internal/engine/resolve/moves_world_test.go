@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/world"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/world"
 )
 
 // TestSetWorldFlag covers the generic path (old → new with history) and the

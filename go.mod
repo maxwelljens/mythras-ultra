@@ -1,4 +1,4 @@
-module github.com/mythras-ultra/myul
+module github.com/maxwelljens/mythras-ultra
 
 go 1.27.4
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // testStore returns a store under t.TempDir with a mutable fixed clock;

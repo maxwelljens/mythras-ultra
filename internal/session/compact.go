@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 const (

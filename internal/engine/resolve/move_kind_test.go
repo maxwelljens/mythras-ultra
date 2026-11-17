@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
 )
 
 // TestMoveKinds pins every move's Kind to its GM-facing tool name:

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // TestInventoryBasics covers AddItem ID assignment/defaults, duplicate and

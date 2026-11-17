@@ -3,8 +3,8 @@ package resolve
 import (
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/combat"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/combat"
 )
 
 // newState returns a session with a fixed seed for deterministic rolls.

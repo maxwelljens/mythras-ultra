@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // inventoryTools returns the inventory and equipment tools.

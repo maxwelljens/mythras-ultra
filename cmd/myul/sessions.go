@@ -18,9 +18,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mythras-ultra/myul/internal/config"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/state"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/state"
 )
 
 // sessionStore loads the configuration through the existing --config

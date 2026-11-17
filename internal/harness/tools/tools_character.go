@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // characterTools returns the character and NPC tools.

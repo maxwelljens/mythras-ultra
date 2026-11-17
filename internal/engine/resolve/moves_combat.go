@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/combat"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/combat"
 )
 
 // StartEncounter opens a combat encounter: participants are registered,

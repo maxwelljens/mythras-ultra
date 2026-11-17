@@ -8,11 +8,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/harness/prompts"
-	"github.com/mythras-ultra/myul/internal/harness/tools"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/prompts"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/tools"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 const (

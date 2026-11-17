@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
 )
 
 // scalarEnvKeys are every MYUL_* key Load consults. Tests blank them so

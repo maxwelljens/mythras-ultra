@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/combat"
-	"github.com/mythras-ultra/myul/internal/engine/dice"
-	"github.com/mythras-ultra/myul/internal/engine/world"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/combat"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/world"
 )
 
 // SchemaVersion is the state schema this build reads and writes. The

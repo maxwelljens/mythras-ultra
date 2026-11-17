@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
 )
 
 // InventoryAdd adds an item to a character's inventory (tool:

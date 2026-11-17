@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // transcriptKeySkills is how many of a character's highest-rated skills the

@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/harness/decide"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 // decideStub is an offline decision model: an httptest /v1/systemone server

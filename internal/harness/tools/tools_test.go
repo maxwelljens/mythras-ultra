@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // newTestRegistry builds a registry without a decision client: every tool

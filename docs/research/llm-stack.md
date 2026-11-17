@@ -706,7 +706,7 @@ Verified from https://raw.githubusercontent.com/charmbracelet/bubbletea/main/UPG
 
 ### 5.4 Current state of *this* repo (for context)
 
-- `myul/go.mod`: `module github.com/mythras-ultra/myul`, `go 1.27.4`; contains
+- `myul/go.mod`: `module github.com/maxwelljens/mythras-ultra`, `go 1.27.4`; contains
   cobra v1.10.2 + viper v1.21.0 (both currently marked `// indirect`) and
   **no** bubbletea/lipgloss/fantasy dependency yet; a grep for
   `charmbracelet|charm.land` under `internal/` returns nothing.

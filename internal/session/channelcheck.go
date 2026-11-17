@@ -3,8 +3,8 @@
 package session
 
 import (
-	"github.com/mythras-ultra/myul/internal/harness/decide"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/decide"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 const (

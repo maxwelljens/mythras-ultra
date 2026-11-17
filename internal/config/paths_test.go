@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
 )
 
 func TestConfigDir(t *testing.T) {

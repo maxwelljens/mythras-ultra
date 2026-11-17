@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 // ErrClosed is returned by [Session.Send] after [Session.Close]: the runner

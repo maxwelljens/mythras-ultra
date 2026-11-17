@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/dice"
-	"github.com/mythras-ultra/myul/internal/engine/rules"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/rules"
 )
 
 // TestResolveAttackPipelineInvariants walks a batch of seeds through the

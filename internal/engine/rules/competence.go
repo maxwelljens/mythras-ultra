@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // ErrNoRandomValue reports a CompetenceLevel with an empty Random dice code

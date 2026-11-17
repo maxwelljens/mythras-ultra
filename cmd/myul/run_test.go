@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/config"
-	"github.com/mythras-ultra/myul/internal/harness/llm"
+	"github.com/maxwelljens/mythras-ultra/internal/config"
+	"github.com/maxwelljens/mythras-ultra/internal/harness/llm"
 )
 
 // TestContextWindow pins the footer's window resolution: the config's

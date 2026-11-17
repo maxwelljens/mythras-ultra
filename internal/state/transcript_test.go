@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // transcriptSession builds a seeded mini-session the way the session loop

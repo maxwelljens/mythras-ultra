@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
 )
 
 // TestNewState checks the constructor contract: recorded seed (including

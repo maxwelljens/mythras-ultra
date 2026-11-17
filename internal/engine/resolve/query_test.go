@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/world"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/world"
 )
 
 // TestGetCharacter covers the folded PC/NPC lookup and its refusal.

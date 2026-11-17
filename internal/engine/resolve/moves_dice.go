@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/rules"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/rules"
 )
 
 // RollDice rolls a dice expression on the session RNG (tool: roll_dice).

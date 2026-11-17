@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
-	"github.com/mythras-ultra/myul/internal/engine/world"
-	"github.com/mythras-ultra/myul/internal/tui"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/world"
+	"github.com/maxwelljens/mythras-ultra/internal/tui"
 )
 
 // summarySkills is how many of the player character's highest-rated skills

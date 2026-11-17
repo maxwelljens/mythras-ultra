@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mythras-ultra/myul/internal/engine/combat"
-	"github.com/mythras-ultra/myul/internal/engine/resolve"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/combat"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/resolve"
 )
 
 // combatTools returns the combat tools, in catalogue order.

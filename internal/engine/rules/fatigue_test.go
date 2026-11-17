@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mythras-ultra/myul/internal/engine/char"
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/char"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // fatigueCharacter returns a character whose trained Endurance equals the

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/mythras-ultra/myul/internal/engine/dice"
+	"github.com/maxwelljens/mythras-ultra/internal/engine/dice"
 )
 
 // GenMethod selects a characteristic generation method (Step 2 › Calculating
