@@ -8,7 +8,7 @@
 A tabletop RPG in your terminal. An LLM plays the game master, a deterministic
 Go engine plays the rules, and the ruleset is [Mythras
 Imperative](https://thedesignmechanism.com/mythras-imperative-a/); a d100
-system with, wounds that matter and not a single hallucinated roll.
+system with wounds that matter and not a single hallucinated roll.
 
 ## What is Mythras Ultra?
 
