@@ -621,13 +621,13 @@ function titleCard(t: number, opacity: number): string {
       anchor: "middle",
       spacing: 6,
     }),
-    text(cx, cy + 16, "An LLM game master. A deterministic d100 engine.", {
+    text(cx, cy + 16, "The story is improvised. The dice are not.", {
       fill: C.fg,
       size: 17,
       anchor: "middle",
       opacity: 0.92,
     }),
-    text(cx, cy + 44, "Mythras Imperative · in your terminal", {
+    text(cx, cy + 44, "Mythras Imperative · a tabletop RPG in your terminal", {
       fill: C.muted,
       size: 14,
       anchor: "middle",
@@ -656,12 +656,12 @@ function outro(t: number, opacity: number): string {
       spacing: 4,
     }),
     rect(cx - 190, cy - 34, 380, 1, C.border),
-    text(cx, cy + 2, "Every roll audited. Every fact earned.", {
+    text(cx, cy + 2, "The GM tells the story. The engine keeps the score.", {
       fill: C.fg,
       size: 19,
       anchor: "middle",
     }),
-    text(cx, cy + 34, "dice · combat · inventory · world state — only the engine moves them", {
+    text(cx, cy + 34, "an optional decision model · one TOML file · four themes", {
       fill: C.muted,
       size: 13.5,
       anchor: "middle",
