@@ -43,7 +43,8 @@ upx:
     # Linux and Windows only: UPX-packed macOS binaries break Gatekeeper,
     # and LZMA/brute-force modes exhausted the build machine's resources.
     goos: [linux, windows]
-    # NRV at max level — fast and light on memory. Never LZMA, never brute.
-    compress: best
+    # NRV level 9 — fast and light on memory. Never --best (grinds for
+    # minutes on large Go binaries), never LZMA, never brute.
+    compress: "9"
     lzma: false
     brute: false
