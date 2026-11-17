@@ -273,7 +273,7 @@ mode), `[prompts]` (paths overriding embedded prompts).
 - Static binary `myul`: `CGO_ENABLED=0`, `-s -w`, version/date ldflags.
 - goreleaser (`.goreleaser.yaml`), golangci-lint (`.golangci.yml`), `just`
   recipes for build/test/lint.
-- Licence: EUPL-1.2 (`LICENSE`, SPDX headers in source).
+- Licence: EUPL-1.2 (`LICENCE`, SPDX headers in source).
 
 ## 12. Docs & agent guidance
 

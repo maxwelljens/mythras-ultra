@@ -6,67 +6,74 @@
 </p>
 
 A tabletop RPG in your terminal. An LLM plays the game master, a deterministic
-Go engine plays the rules, and the ruleset is Mythras Imperative – d100, wounds
-that matter, and not a single fudged roll.
+Go engine plays the rules, and the ruleset is [Mythras
+Imperative](https://thedesignmechanism.com/mythras-imperative-a/); a d100
+system with, wounds that matter and not a single hallucinated roll.
 
 ## What is Mythras Ultra?
 
 `myul` isn't another chatbot pretending to run a campaign. It's a terminal game
 with one main job: letting you play a proper d100 tabletop RPG against a game
-master that never sleeps, never cancels the session, and never gets to decide
-what the dice say. Think of it as a GM in a box. You type what you do, in plain
-English, and the story answers.
+master that never sleeps, never cancels the session, and, most importantly,
+respects what the dice say. Think of it as a GM in a box. You type what you do,
+in plain English, and the story answers.
 
 > The salt wind combs the grass flat along the trade road. Two weeks ago the
 > baron's riders burned the western tollhouse, and every caravan since has
 > travelled under armed guard. What do you do?
 
 That is the opening line of a real session, narrated by the GM from the
-embedded Mythras Imperative rulebook. You answer. It narrates. And when the
-story needs a number – a skill test, a wound, an item, a clock ticking toward
-something bad – the GM has to ask the engine for it.
+embedded Mythras Imperative rulebook. You answer and it narrates. When the
+story needs a number, like a skill test, a wound, an item, a clock ticking
+toward something bad, the GM has to ask the engine for it.
 
 The table itself is a proper terminal app: markdown chat with an
 in-character/out-of-character switch, a `$VISUAL` editor for long messages,
 animated dice, a character panel, and four 16-colour themes that adapt to light
 and dark terminals.
 
-## What keeps the GM honest?
+## What keeps the GM real?
 
-If you have played with an LLM as a game master before, you know the failure
-mode. It forgets your hit points. It agrees that your plan is brilliant. It
-rolls a die in prose and tells you that you succeeded, because you sounded
-confident. A game master who can be talked into anything is not a game master;
-he is a yes-man, and the game evaporates the moment you notice.
+If you have played with an LLM before for any amount of time, you know the
+failure mode. It "forgets" basic facts, because it is just a glorified token
+guesser. It always agrees that your plan is brilliant. It can even roll a die
+in prose and tell you that you succeeded in the most epic way possible, because
+you sounded confident.
 
-Mythras Ultra takes the numbers away from the storyteller. Every roll, skill
-test, attack, wound, inventory change and world flag goes through a
-deterministic engine as a typed move. The GM calls the engine as a tool and
-narrates from the result it gets back: the dice it rolled, the facts it
-changed, and the rulebook section it applied. Ask the GM for a critical success
-and it can want one for you; it cannot give you one. The engine rolls a seeded
-d100, and 04 against Perception 65 is a critical because the rules say so, not
-because the story wanted a win. When the GM tries something the rules forbid,
-the engine refuses, and the refusal is final.
+This is obviously not very good. A game master who can be talked into anything
+is not a game master; he is a yes-man, and the game evaporates pretty quickly.
 
-This is what makes the thing worth playing. Stakes survive. A wound you took in
+Mythras Ultra takes the numbers away from the LLM and tries to put it into
+a deterministic engine, as a program should. Every roll, skill test, attack,
+wound, inventory change and world flag goes through a deterministic engine as
+a typed move. The GM calls the engine as a tool and narrates from the result it
+gets back: the dice it rolled, the facts it changed, and the rulebook section
+it applied -- because, yes, it reads from the rulebook. Ask the GM for
+a critical success and it can want one for you; it cannot give you one. The
+engine rolls a seeded d100, and 04 against Perception 65 is a critical because
+the rules say so, not because the LLM's tokens landed on a win. When the GM
+tries something the rules forbid, the engine refuses, and the refusal is final.
+
+This is what makes the thing worth playing: stakes survive, a wound you took in
 session three is still on your sheet in session nine, because your sheet is
-state, not memory. The world keeps flags: the tollhouse stays burned, the
-economy stays strained, and the GM must narrate around facts it cannot edit.
-When you win, you won. Nobody handed it to you.
+state saved in a file, not context memory that is notoriously unreliable. The
+world keeps flags, such as tollhouse staying burnt, the economy staying
+strained, and the GM must narrate around facts it cannot edit. When you win,
+you won. When you lose, it was also fair.
 
-## Does the GM grade its own homework?
+## Decision models: Force the GM to grade its own homework!
 
-Not if you don't want it to. The optional decision model is a second, smaller
-model – tev1 through Ollama, running locally – with one job: answering whether
-a player action needs a check at all, and which skill it calls for. The
-storyteller does not get to skip the roll because a roll would spoil his scene.
-The `decide` tool asks the decision model, and the answer goes to the engine
-like everything else.
+As an option, you can employ [decision
+models](https://docs.openclaw.ai/concepts/decision-models) as a second, smaller
+helper. For instance, `tev1` through Ollama, running locally, with one job:
+answering whether a player action needs a check at all, and which skill it
+calls for. The storyteller does not get to skip the roll because a roll would
+spoil his scene. The `decide` tool asks the decision model, and the answer goes
+to the engine like everything else.
 
-I made it optional on purpose. Play continues without it; the GM falls back to
-judging checks itself, exactly as a human GM would. Switch it on when you want
-the rules applied by something that has no stake in the story.
+Of course, Mythras Ultra can work without it, in which case the GM falls back
+to judging checks itself. Switch it on when you want extra guardrails to make
+the experience all the more organised.
 
 ## How do I make it mine?
 
@@ -120,7 +127,7 @@ The design contract is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Status
 
 Early development. The engine, harness, session loop, TUI and CLI all work and
-are covered by the offline test suite; APIs may still change.
+are covered by the offline test suite, but API may still change.
 
 ## Documentation
 
@@ -138,4 +145,4 @@ are covered by the offline test suite; APIs may still change.
 
 ## Licence
 
-European Union Public Licence 1.2 (EUPL-1.2) — see [`LICENSE`](LICENSE).
+European Union Public Licence 1.2 (EUPL-1.2) — see [`LICENCE`](LICENCE).
